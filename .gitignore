@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.o
+program
+output.ll
+input.txt
