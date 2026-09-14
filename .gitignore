@@ -6,3 +6,6 @@ program
 output.ll
 input.txt
 compiler_practice1_backup.py
+lexer_bad*.txt
+lexer_test.txt
+test_output.ll
