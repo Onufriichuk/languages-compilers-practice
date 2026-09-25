@@ -1,6 +1,5 @@
 import sys
 import os
-import re
 
 from llvmlite import ir
 import llvmlite.binding as llvm
@@ -10,30 +9,1187 @@ I32 = ir.IntType(32)
 I8 = ir.IntType(8)
 
 
-def compilation_error(line_number, message, output_path=None):
-    if output_path and os.path.exists(output_path):
-        os.remove(output_path)
+class CompileError(Exception):
+    pass
 
-    print(
-        f"compilation error: line {line_number}: {message}",
-        file=sys.stderr
-    )
-    sys.exit(1)
+class Node:
+    def __init__(self, line, column):
+        self.line = line
+        self.column = column
+
+    def dump(self, indent=0):
+        raise NotImplementedError
 
 
-def valid_name(name):
+class ProgramNode(Node):
+    def __init__(self, statements, exit_node):
+        super().__init__(1, 1)
+        self.statements = statements
+        self.exit_node = exit_node
+
+    def dump(self, indent=0):
+        lines = [" " * indent + "Program"]
+
+        for stmt in self.statements:
+            lines.extend(stmt.dump(indent + 2))
+
+        lines.extend(self.exit_node.dump(indent + 2))
+        return lines
+
+
+class StmtNode(Node):
+    pass
+
+
+class DeclNode(StmtNode):
+    def __init__(self, line, column, name, mutable, init):
+        super().__init__(line, column)
+        self.name = name
+        self.mutable = mutable
+        self.init = init
+
+    def dump(self, indent=0):
+        kind = "mut" if self.mutable else "const"
+
+        lines = [
+            " " * indent + f"Decl {self.name} {kind}"
+        ]
+
+        lines.extend(self.init.dump(indent + 2))
+        return lines
+
+
+class AssignNode(StmtNode):
+    def __init__(self, line, column, name, value):
+        super().__init__(line, column)
+        self.name = name
+        self.value = value
+
+    def dump(self, indent=0):
+        lines = [
+            " " * indent + f"Assign {self.name}"
+        ]
+
+        lines.extend(self.value.dump(indent + 2))
+        return lines
+
+
+class ExitNode(Node):
+    def __init__(self, line, column, value):
+        super().__init__(line, column)
+        self.value = value
+
+    def dump(self, indent=0):
+        lines = [" " * indent + "Exit"]
+        lines.extend(self.value.dump(indent + 2))
+        return lines
+
+
+class ExprNode(Node):
+    pass
+
+
+class BinOpNode(ExprNode):
+    def __init__(
+        self,
+        line,
+        column,
+        op,
+        left,
+        right,
+    ):
+        super().__init__(line, column)
+        self.op = op
+        self.left = left
+        self.right = right
+
+    def dump(self, indent=0):
+        lines = [
+            " " * indent + f"BinOp {self.op}"
+        ]
+
+        lines.extend(self.left.dump(indent + 2))
+        lines.extend(self.right.dump(indent + 2))
+        return lines
+
+
+class VarNode(ExprNode):
+    def __init__(self, line, column, name):
+        super().__init__(line, column)
+        self.name = name
+
+    def dump(self, indent=0):
+        return [
+            " " * indent + f"Var {self.name}"
+        ]
+
+
+class ConstNode(ExprNode):
+    def __init__(self, line, column, value):
+        super().__init__(line, column)
+        self.value = value
+
+    def dump(self, indent=0):
+        return [
+            " " * indent + f"Const {self.value}"
+        ]
+
+class Parser:
+    def __init__(self, lines):
+        self.lines = lines
+        self.toks = []
+        self.pos = 0
+
+    def peek(self):
+        if self.pos < len(self.toks):
+            return self.toks[self.pos]
+        return None
+
+    def eat(self):
+        tok = self.peek()
+
+        if tok is None:
+            return None
+
+        self.pos += 1
+        return tok
+
+    def expect_text(self, text, message):
+        tok = self.peek()
+
+        if tok is None:
+            self.error_end(message)
+
+        if tok.text != text:
+            raise CompileError(
+                f"line {tok.line}:{tok.column}: "
+                f"{message}, got '{tok.text}'"
+            )
+
+        return self.eat()
+
+    def expect_kind(self, kind, message):
+        tok = self.peek()
+
+        if tok is None:
+            self.error_end(message)
+
+        if tok.kind != kind:
+            raise CompileError(
+                f"line {tok.line}:{tok.column}: "
+                f"{message}, got '{tok.text}'"
+            )
+
+        return self.eat()
+
+    def error_end(self, message):
+        if self.toks:
+            last = self.toks[-1]
+            column = last.column + len(last.text)
+            line = last.line
+        else:
+            line = 1
+            column = 1
+
+        raise CompileError(
+            f"line {line}:{column}: {message}"
+        )
+
+    def parse_program(self):
+        statements = []
+        exit_node = None
+        found_exit = False
+
+        for toks in self.lines:
+            if not toks:
+                continue
+
+            self.toks = toks
+            self.pos = 0
+
+            if found_exit:
+                tok = self.peek()
+                raise CompileError(
+                    f"line {tok.line}:{tok.column}: "
+                    "code after exit is not allowed"
+                )
+
+            first = self.peek()
+
+            if (
+                first.kind == "keyword"
+                and first.text == "exit"
+            ):
+                exit_node = self.parse_exit()
+                found_exit = True
+            else:
+                statements.append(
+                    self.parse_statement()
+                )
+
+            if self.peek() is not None:
+                tok = self.peek()
+
+                raise CompileError(
+                    f"line {tok.line}:{tok.column}: "
+                    f"unexpected '{tok.text}' after the statement"
+                )
+
+        if exit_node is None:
+            raise CompileError(
+                "line 1:1: program needs an exit statement"
+            )
+
+        return ProgramNode(
+            statements,
+            exit_node,
+        )
+
+    def parse_statement(self):
+        tok = self.peek()
+
+        if tok is None:
+            self.error_end(
+                "expected a statement"
+            )
+
+        if (
+            tok.kind == "keyword"
+            and tok.text == "i32"
+        ):
+            return self.parse_decl()
+
+        if tok.kind == "identifier":
+            return self.parse_assign()
+
+        raise CompileError(
+            f"line {tok.line}:{tok.column}: "
+            f"cannot start a statement with '{tok.text}'"
+        )
+
+    def parse_decl(self):
+        self.expect_text(
+            "i32",
+            "expected 'i32'"
+        )
+
+        mutable = False
+
+        tok = self.peek()
+
+        if (
+            tok is not None
+            and tok.kind == "keyword"
+            and tok.text == "mut"
+        ):
+            self.eat()
+            mutable = True
+
+        name = self.expect_kind(
+            "identifier",
+            "expected a variable name"
+        )
+
+        tok = self.peek()
+
+        if (
+            tok is None
+            or tok.kind != "lbrace"
+        ):
+            raise CompileError(
+                f"line {name.line}:{name.column}: "
+                f"variable '{name.text}' needs an initialiser in {{}}"
+            )
+
+        self.eat()
+
+        init = self.parse_expr()
+
+        self.expect_kind(
+            "rbrace",
+            "expected '}'"
+        )
+
+        return DeclNode(
+            name.line,
+            name.column,
+            name.text,
+            mutable,
+            init,
+        )
+
+    def parse_assign(self):
+        name = self.expect_kind(
+            "identifier",
+            "expected variable name"
+        )
+
+        tok = self.peek()
+
+        if (
+            tok is None
+            or tok.kind != "operator"
+            or tok.text != ":="
+        ):
+            if tok is None:
+                self.error_end(
+                    f"expected ':=' after '{name.text}'"
+                )
+
+            raise CompileError(
+                f"line {tok.line}:{tok.column}: "
+                f"expected ':=' after '{name.text}', "
+                f"got '{tok.text}'"
+            )
+
+        self.eat()
+
+        value = self.parse_expr()
+
+        return AssignNode(
+            name.line,
+            name.column,
+            name.text,
+            value,
+        )
+
+    def parse_exit(self):
+        exit_tok = self.expect_text(
+            "exit",
+            "expected 'exit'"
+        )
+
+        value = self.parse_factor()
+
+        return ExitNode(
+            exit_tok.line,
+            exit_tok.column,
+            value,
+        )
+
+    def parse_expr(self):
+        node = self.parse_term()
+
+        while True:
+            tok = self.peek()
+
+            if (
+                tok is None
+                or tok.kind != "operator"
+                or tok.text not in {"+", "-"}
+            ):
+                break
+
+            self.eat()
+
+            right = self.parse_term()
+
+            node = BinOpNode(
+                tok.line,
+                tok.column,
+                tok.text,
+                node,
+                right,
+            )
+
+        return node
+
+    def parse_term(self):
+        node = self.parse_factor()
+
+        while True:
+            tok = self.peek()
+
+            if (
+                tok is None
+                or tok.kind != "operator"
+                or tok.text != "*"
+            ):
+                break
+
+            self.eat()
+
+            right = self.parse_factor()
+
+            node = BinOpNode(
+                tok.line,
+                tok.column,
+                tok.text,
+                node,
+                right,
+            )
+
+        return node
+
+    def parse_factor(self):
+        tok = self.peek()
+
+        if tok is None:
+            self.error_end(
+                "expected a constant or a variable"
+            )
+
+        if tok.kind == "number":
+            self.eat()
+
+            return ConstNode(
+                tok.line,
+                tok.column,
+                int(tok.text),
+            )
+
+        if tok.kind == "identifier":
+            self.eat()
+
+            return VarNode(
+                tok.line,
+                tok.column,
+                tok.text,
+            )
+
+        raise CompileError(
+            f"line {tok.line}:{tok.column}: "
+            f"expected a constant or a variable, "
+            f"got '{tok.text}'"
+        )
+
+class CodeGen:
+    def __init__(self, module, builder, printf, fmt):
+        self.module = module
+        self.builder = builder
+        self.printf = printf
+        self.fmt = fmt
+        self.symbols = {}
+
+    def generate(self, program):
+        for stmt in program.statements:
+            self.visit_stmt(stmt)
+
+        self.visit_exit(program.exit_node)
+
+    def visit_stmt(self, node):
+        if isinstance(node, DeclNode):
+            return self.visit_decl(node)
+
+        if isinstance(node, AssignNode):
+            return self.visit_assign(node)
+
+        raise CompileError(
+            f"line {node.line}:{node.column}: unknown statement"
+        )
+
+    def visit_expr(self, node):
+        if isinstance(node, ConstNode):
+            return ir.Constant(
+                I32,
+                node.value,
+            )
+
+        if isinstance(node, VarNode):
+            return self.visit_var(node)
+
+        if isinstance(node, BinOpNode):
+            return self.visit_binop(node)
+
+        raise CompileError(
+            f"line {node.line}:{node.column}: unknown expression"
+        )
+
+    def visit_var(self, node):
+        name = node.name
+
+        if name not in self.symbols:
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"variable '{name}' is used before its declaration"
+            )
+
+        return self.builder.load(
+            self.symbols[name]["ptr"],
+            name=f"load_{name}",
+        )
+
+    def visit_binop(self, node):
+        left = self.visit_expr(node.left)
+        right = self.visit_expr(node.right)
+
+        if node.op == "+":
+            return self.builder.add(
+                left,
+                right,
+                name="addtmp",
+            )
+
+        if node.op == "-":
+            return self.builder.sub(
+                left,
+                right,
+                name="subtmp",
+            )
+
+        if node.op == "*":
+            return self.builder.mul(
+                left,
+                right,
+                name="multmp",
+            )
+
+        raise CompileError(
+            f"line {node.line}:{node.column}: "
+            f"unknown operator '{node.op}'"
+        )
+
+    def visit_decl(self, node):
+        name = node.name
+
+        if name in self.symbols:
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"variable '{name}' is already declared"
+            )
+
+        value = self.visit_expr(node.init)
+
+        ptr = self.builder.alloca(
+            I32,
+            name=name,
+        )
+
+        self.builder.store(
+            value,
+            ptr,
+        )
+
+        self.symbols[name] = {
+            "ptr": ptr,
+            "mutable": node.mutable,
+        }
+
+    def visit_assign(self, node):
+        name = node.name
+
+        if name not in self.symbols:
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"variable '{name}' is used before its declaration"
+            )
+
+        if not self.symbols[name]["mutable"]:
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"cannot assign to '{name}': it is not mut"
+            )
+
+        value = self.visit_expr(node.value)
+
+        self.builder.store(
+            value,
+            self.symbols[name]["ptr"],
+        )
+
+    def visit_exit(self, node):
+        value = self.visit_expr(node.value)
+
+        fmt_ptr = self.builder.bitcast(
+            self.fmt,
+            ir.PointerType(I8),
+        )
+
+        self.builder.call(
+            self.printf,
+            [fmt_ptr, value],
+        )
+
+        self.builder.ret(
+            ir.Constant(I32, 0)
+        )
+
+class Token:
+    def __init__(self, kind, text, line, column):
+        self.kind = kind
+        self.text = text
+        self.line = line
+        self.column = column
+
+    def __repr__(self):
+        return (
+            f"Token(kind={self.kind!r}, "
+            f"text={self.text!r}, "
+            f"line={self.line}, "
+            f"column={self.column})"
+        )
+
+
+KEYWORDS = {
+    "i32": "keyword",
+    "mut": "keyword",
+    "exit": "keyword",
+}
+
+
+def is_alpha(b):
     return (
-        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-        and name not in {"int", "exit"}
+        ord("a") <= b <= ord("z")
+        or ord("A") <= b <= ord("Z")
+        or b == ord("_")
+    )
+
+
+def is_digit(b):
+    return ord("0") <= b <= ord("9")
+
+
+def lex(data: bytes):
+    lines = []
+    tokens = []
+
+    state = "START"
+
+    i = 0
+    line = 1
+    col = 1
+
+    start = 0
+    start_line = 1
+    start_col = 1
+
+    open_brace_line = None
+    open_brace_col = None
+
+    while i <= len(data):
+        b = data[i] if i < len(data) else None
+
+        if state == "START":
+            if b is None:
+                break
+
+            if b in (32, 9):
+                i += 1
+                col += 1
+                continue
+
+            if b == 10:
+                if open_brace_line is not None:
+                    raise CompileError(
+                        f"line {open_brace_line}:{open_brace_col}: "
+                        "'{' is not closed before the end of the line"
+                    )
+
+                lines.append(tokens)
+                tokens = []
+
+                i += 1
+                line += 1
+                col = 1
+                continue
+
+            if is_alpha(b):
+                state = "IDENT"
+                start = i
+                start_line = line
+                start_col = col
+
+                i += 1
+                col += 1
+                continue
+
+            if is_digit(b):
+                state = "NUMBER"
+                start = i
+                start_line = line
+                start_col = col
+
+                i += 1
+                col += 1
+                continue
+
+            if b == ord("{"):
+                tokens.append(
+                    Token("lbrace", "{", line, col)
+                )
+
+                open_brace_line = line
+                open_brace_col = col
+
+                i += 1
+                col += 1
+                continue
+
+            if b == ord("}"):
+                if open_brace_line is None:
+                    raise CompileError(
+                        f"line {line}:{col}: unexpected byte '}}'"
+                    )
+
+                tokens.append(
+                    Token("rbrace", "}", line, col)
+                )
+
+                open_brace_line = None
+                open_brace_col = None
+
+                i += 1
+                col += 1
+                continue
+
+            if b in (
+                ord("+"),
+                ord("-"),
+                ord("*"),
+            ):
+                tokens.append(
+                    Token(
+                        "operator",
+                        chr(b),
+                        line,
+                        col,
+                    )
+                )
+
+                i += 1
+                col += 1
+                continue
+
+            if b == ord(":"):
+                state = "COLON"
+                start_line = line
+                start_col = col
+
+                i += 1
+                col += 1
+                continue
+
+            if b > 127:
+                raise CompileError(
+                    f"line {line}:{col}: unexpected byte {b}"
+                )
+
+            raise CompileError(
+                f"line {line}:{col}: unexpected byte '{chr(b)}'"
+            )
+
+        elif state == "IDENT":
+            if (
+                b is not None
+                and (is_alpha(b) or is_digit(b))
+            ):
+                i += 1
+                col += 1
+                continue
+
+            word = data[start:i].decode("ascii")
+
+            kind = KEYWORDS.get(
+                word,
+                "identifier",
+            )
+
+            tokens.append(
+                Token(
+                    kind,
+                    word,
+                    start_line,
+                    start_col,
+                )
+            )
+
+            state = "START"
+            continue
+
+        elif state == "NUMBER":
+            if b is not None and is_digit(b):
+                i += 1
+                col += 1
+                continue
+
+            if b is not None and is_alpha(b):
+                raise CompileError(
+                    f"line {start_line}:{start_col}: "
+                    "letter inside number"
+                )
+
+            number = data[start:i].decode("ascii")
+
+            tokens.append(
+                Token(
+                    "number",
+                    number,
+                    start_line,
+                    start_col,
+                )
+            )
+
+            state = "START"
+            continue
+
+        elif state == "COLON":
+            if b == ord("="):
+                tokens.append(
+                    Token(
+                        "operator",
+                        ":=",
+                        start_line,
+                        start_col,
+                    )
+                )
+
+                i += 1
+                col += 1
+                state = "START"
+                continue
+
+            raise CompileError(
+                f"line {start_line}:{start_col}: "
+                "':' must be followed by '='"
+            )
+
+    if open_brace_line is not None:
+        raise CompileError(
+            f"line {open_brace_line}:{open_brace_col}: "
+            "'{' is not closed before the end of the line"
+        )
+
+    if tokens:
+        lines.append(tokens)
+
+    return lines
+
+
+def error(token, message):
+    raise CompileError(
+        f"line {token.line}:{token.column}: {message}"
+    )
+
+
+def load_variable(token, symbols, builder):
+    name = token.text
+
+    if name not in symbols:
+        error(
+            token,
+            f"variable '{name}' is used before its declaration"
+        )
+
+    return builder.load(
+        symbols[name]["ptr"],
+        name=f"load_{name}",
+    )
+
+
+def operand_value(token, symbols, builder):
+    if token.kind == "number":
+        return ir.Constant(
+            I32,
+            int(token.text),
+        )
+
+    if token.kind == "identifier":
+        return load_variable(
+            token,
+            symbols,
+            builder,
+        )
+
+    error(
+        token,
+        "expected a number or variable"
+    )
+
+
+def parse_expression(tokens, symbols, builder):
+    if len(tokens) == 1:
+        return operand_value(
+            tokens[0],
+            symbols,
+            builder,
+        )
+
+    if len(tokens) == 3:
+        left_token = tokens[0]
+        operator_token = tokens[1]
+        right_token = tokens[2]
+
+        if operator_token.kind != "operator":
+            error(
+                operator_token,
+                "expected arithmetic operator"
+            )
+
+        if operator_token.text not in {"+", "-", "*"}:
+            error(
+                operator_token,
+                "expected '+', '-' or '*'"
+            )
+
+        left = operand_value(
+            left_token,
+            symbols,
+            builder,
+        )
+
+        right = operand_value(
+            right_token,
+            symbols,
+            builder,
+        )
+
+        if operator_token.text == "+":
+            return builder.add(
+                left,
+                right,
+                name="addtmp",
+            )
+
+        if operator_token.text == "-":
+            return builder.sub(
+                left,
+                right,
+                name="subtmp",
+            )
+
+        return builder.mul(
+            left,
+            right,
+            name="multmp",
+        )
+
+    token = tokens[0]
+
+    error(
+        token,
+        "invalid expression"
+    )
+
+
+def parse_declaration(tokens, symbols, builder):
+    type_token = tokens[0]
+
+    index = 1
+    mutable = False
+
+    if (
+        index < len(tokens)
+        and tokens[index].kind == "keyword"
+        and tokens[index].text == "mut"
+    ):
+        mutable = True
+        index += 1
+
+    if index >= len(tokens):
+        error(
+            type_token,
+            "expected variable name"
+        )
+
+    name_token = tokens[index]
+
+    if name_token.kind != "identifier":
+        error(
+            name_token,
+            "expected variable name"
+        )
+
+    name = name_token.text
+    index += 1
+
+    if name in symbols:
+        error(
+            name_token,
+            f"variable '{name}' is already declared"
+        )
+
+    if (
+        index >= len(tokens)
+        or tokens[index].kind != "lbrace"
+    ):
+        error(
+            name_token,
+            f"variable '{name}' needs an initialiser in {{}}"
+        )
+
+    index += 1
+
+    expression_start = index
+
+    while (
+        index < len(tokens)
+        and tokens[index].kind != "rbrace"
+    ):
+        index += 1
+
+    if index >= len(tokens):
+        error(
+            tokens[expression_start - 1],
+            "'{' is not closed"
+        )
+
+    expression_tokens = tokens[
+        expression_start:index
+    ]
+
+    if not expression_tokens:
+        error(
+            tokens[index],
+            "initialiser cannot be empty"
+        )
+
+    value = parse_expression(
+        expression_tokens,
+        symbols,
+        builder,
+    )
+
+    index += 1
+
+    if index != len(tokens):
+        error(
+            tokens[index],
+            "extra tokens after declaration"
+        )
+
+    ptr = builder.alloca(
+        I32,
+        name=name,
+    )
+
+    builder.store(
+        value,
+        ptr,
+    )
+
+    symbols[name] = {
+        "ptr": ptr,
+        "mutable": mutable,
+    }
+
+
+def parse_assignment(tokens, symbols, builder):
+    target_token = tokens[0]
+
+    if target_token.kind != "identifier":
+        error(
+            target_token,
+            "expected variable name"
+        )
+
+    name = target_token.text
+
+    if name not in symbols:
+        error(
+            target_token,
+            f"variable '{name}' is used before its declaration"
+        )
+
+    if not symbols[name]["mutable"]:
+        error(
+            target_token,
+            f"cannot assign to '{name}': it is not mut"
+        )
+
+    if len(tokens) < 3:
+        error(
+            target_token,
+            "assignment needs a value"
+        )
+
+    assignment_token = tokens[1]
+
+    if (
+        assignment_token.kind != "operator"
+        or assignment_token.text != ":="
+    ):
+        error(
+            assignment_token,
+            "expected ':='"
+        )
+
+    expression_tokens = tokens[2:]
+
+    value = parse_expression(
+        expression_tokens,
+        symbols,
+        builder,
+    )
+
+    builder.store(
+        value,
+        symbols[name]["ptr"],
+    )
+
+
+def parse_exit(
+    tokens,
+    symbols,
+    builder,
+    printf,
+    fmt,
+):
+    exit_token = tokens[0]
+
+    if len(tokens) != 2:
+        error(
+            exit_token,
+            "exit expects one constant or variable"
+        )
+
+    value_token = tokens[1]
+
+    if value_token.kind == "number":
+        value = ir.Constant(
+            I32,
+            int(value_token.text),
+        )
+
+    elif value_token.kind == "identifier":
+        value = load_variable(
+            value_token,
+            symbols,
+            builder,
+        )
+
+    else:
+        error(
+            value_token,
+            "exit expects a constant or variable"
+        )
+
+    fmt_ptr = builder.bitcast(
+        fmt,
+        ir.PointerType(I8),
+    )
+
+    builder.call(
+        printf,
+        [fmt_ptr, value],
+    )
+
+    builder.ret(
+        ir.Constant(I32, 0)
     )
 
 
 def compile_program(source_path, output_path):
-    module = ir.Module(name="practice1")
+    with open(source_path, "rb") as f:
+        data = f.read()
+
+    token_lines = lex(data)
+
+    parser = Parser(token_lines)
+    tree = parser.parse_program()
+
+    module = ir.Module(name="practice3")
     module.triple = llvm.get_default_triple()
 
-    main_type = ir.FunctionType(I32, [])
-    main = ir.Function(module, main_type, name="main")
+    main_type = ir.FunctionType(
+        I32,
+        [],
+    )
+
+    main = ir.Function(
+        module,
+        main_type,
+        name="main",
+    )
 
     entry = main.append_basic_block("entry")
     builder = ir.IRBuilder(entry)
@@ -41,289 +1197,92 @@ def compile_program(source_path, output_path):
     printf_type = ir.FunctionType(
         I32,
         [ir.PointerType(I8)],
-        var_arg=True
+        var_arg=True,
     )
 
     printf = ir.Function(
         module,
         printf_type,
-        name="printf"
+        name="printf",
     )
 
     text = b"Program exit with result %d\n\0"
 
-    fmt_type = ir.ArrayType(I8, len(text))
+    fmt_type = ir.ArrayType(
+        I8,
+        len(text),
+    )
 
     fmt = ir.GlobalVariable(
         module,
         fmt_type,
-        name="fmt"
+        name="fmt",
     )
 
     fmt.linkage = "private"
     fmt.global_constant = True
     fmt.initializer = ir.Constant(
         fmt_type,
-        bytearray(text)
+        bytearray(text),
     )
 
-    symbols = {}
-    found_exit = False
-
-    with open(source_path, "r") as f:
-        lines = f.readlines()
-
-    for line_number, raw_line in enumerate(lines, start=1):
-        line = raw_line.strip()
-
-        if not line:
-            compilation_error(
-                line_number,
-                "empty line",
-                output_path
-            )
-
-        if line.startswith("int "):
-            parts = line.split()
-
-            if len(parts) != 2:
-                compilation_error(
-                    line_number,
-                    "invalid declaration",
-                    output_path
-                )
-
-            name = parts[1]
-
-            if not valid_name(name):
-                compilation_error(
-                    line_number,
-                    f"invalid variable name '{name}'",
-                    output_path
-                )
-
-            if name in symbols:
-                compilation_error(
-                    line_number,
-                    f"variable '{name}' already declared",
-                    output_path
-                )
-
-            symbols[name] = builder.alloca(
-                I32,
-                name=name
-            )
-
-            continue
-
-        if line.startswith("exit "):
-            parts = line.split()
-
-            if len(parts) != 2:
-                compilation_error(
-                    line_number,
-                    "invalid exit statement",
-                    output_path
-                )
-
-            name = parts[1]
-
-            if name not in symbols:
-                compilation_error(
-                    line_number,
-                    f"undeclared variable '{name}'",
-                    output_path
-                )
-
-            value = builder.load(
-                symbols[name],
-                name=f"load_{name}"
-            )
-
-            fmt_ptr = builder.bitcast(
-                fmt,
-                ir.PointerType(I8)
-            )
-
-            builder.call(
-                printf,
-                [fmt_ptr, value]
-            )
-
-            builder.ret(
-                ir.Constant(I32, 0)
-            )
-
-            found_exit = True
-
-            if line_number != len(lines):
-                compilation_error(
-                    line_number,
-                    "exit must be the last line",
-                    output_path
-                )
-
-            break
-
-        if ":=" in line:
-            left, right = line.split(":=", 1)
-
-            target = left.strip()
-            expression = right.strip()
-
-            if target not in symbols:
-                compilation_error(
-                    line_number,
-                    f"undeclared variable '{target}'",
-                    output_path
-                )
-
-            result = parse_expression(
-                expression,
-                symbols,
-                builder,
-                line_number,
-                output_path
-            )
-
-            builder.store(
-                result,
-                symbols[target]
-            )
-
-            continue
-
-        compilation_error(
-            line_number,
-            "cannot parse statement",
-            output_path
-        )
-
-    if not found_exit:
-        compilation_error(
-            len(lines) if lines else 1,
-            "no exit statement",
-            output_path
-        )
-
-    with open(output_path, "w") as out:
-        out.write(str(module))
-
-
-def parse_operand(
-    token,
-    symbols,
-    builder,
-    line_number,
-    output_path
-):
-    token = token.strip()
-
-    if re.fullmatch(r"-?\d+", token):
-        return ir.Constant(
-            I32,
-            int(token)
-        )
-
-    if token in symbols:
-        return builder.load(
-            symbols[token],
-            name=f"load_{token}"
-        )
-
-    compilation_error(
-        line_number,
-        f"undeclared variable '{token}'",
-        output_path
-    )
-
-
-def parse_expression(
-    expression,
-    symbols,
-    builder,
-    line_number,
-    output_path
-):
-    expression = expression.strip()
-
-    if re.fullmatch(
-        r"-?\d+|[A-Za-z_][A-Za-z0-9_]*",
-        expression
-    ):
-        return parse_operand(
-            expression,
-            symbols,
-            builder,
-            line_number,
-            output_path
-        )
-
-    match = re.fullmatch(
-        r"(.+?)\s*([+\-*])\s*(.+)",
-        expression
-    )
-
-    if not match:
-        compilation_error(
-            line_number,
-            "invalid expression",
-            output_path
-        )
-
-    left_text = match.group(1).strip()
-    operator = match.group(2)
-    right_text = match.group(3).strip()
-
-    left = parse_operand(
-        left_text,
-        symbols,
+    codegen = CodeGen(
+        module,
         builder,
-        line_number,
-        output_path
+        printf,
+        fmt,
     )
 
-    right = parse_operand(
-        right_text,
-        symbols,
-        builder,
-        line_number,
-        output_path
-    )
+    codegen.generate(tree)
 
-    if operator == "+":
-        return builder.add(
-            left,
-            right,
-            name="addtmp"
-        )
-
-    if operator == "-":
-        return builder.sub(
-            left,
-            right,
-            name="subtmp"
-        )
-
-    if operator == "*":
-        return builder.mul(
-            left,
-            right,
-            name="multmp"
-        )
-
-    compilation_error(
-        line_number,
-        "unsupported operator",
-        output_path
-    )
-
+    with open(output_path, "w") as f:
+        f.write(str(module))
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--ast":
+        source_path = sys.argv[2]
+
+        try:
+            with open(source_path, "rb") as f:
+                data = f.read()
+
+            token_lines = lex(data)
+
+            parser = Parser(token_lines)
+            tree = parser.parse_program()
+
+            for line in tree.dump():
+                print(line)
+
+        except CompileError as e:
+            print(
+                f"compilation error: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        except FileNotFoundError:
+            print(
+                f"compilation error: source file "
+                f"'{source_path}' not found",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        return
+
     if len(sys.argv) != 3:
         print(
-            "usage: python3 compiler.py <source> <output.ll>",
-            file=sys.stderr
+            "usage:",
+            file=sys.stderr,
+        )
+        print(
+            "  python3 compiler.py <source> <output.ll>",
+            file=sys.stderr,
+        )
+        print(
+            "  python3 compiler.py --ast <source>",
+            file=sys.stderr,
         )
         sys.exit(1)
 
@@ -336,14 +1295,30 @@ def main():
     try:
         compile_program(
             source_path,
-            output_path
+            output_path,
         )
 
-    except FileNotFoundError:
+    except CompileError as e:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
         print(
-            f"compilation error: source file '{source_path}' not found",
-            file=sys.stderr
+            f"compilation error: {e}",
+            file=sys.stderr,
         )
+
+        sys.exit(1)
+
+    except FileNotFoundError:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        print(
+            f"compilation error: source file "
+            f"'{source_path}' not found",
+            file=sys.stderr,
+        )
+
         sys.exit(1)
 
 
