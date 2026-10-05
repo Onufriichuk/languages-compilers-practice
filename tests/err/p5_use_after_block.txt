@@ -1,0 +1,5 @@
+if true
+{
+i32 x{1}
+}
+exit x
