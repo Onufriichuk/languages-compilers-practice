@@ -1,0 +1,11 @@
+i32 mut r{0}
+bool b{true}
+if b
+{
+r := 1
+}
+else
+{
+r := 2
+}
+exit r
