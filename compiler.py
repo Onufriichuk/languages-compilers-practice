@@ -148,9 +148,70 @@ class BoolNode(ExprNode):
             " " * indent + f"Bool {text}"
         ]
 
+class BlockNode(Node):
+    def __init__(self, line, column, statements, exit_node=None):
+        super().__init__(line, column)
+        self.statements = statements
+        self.exit_node = exit_node
+
+    def dump(self, indent=0):
+        lines = [" " * indent + "Block"]
+
+        for stmt in self.statements:
+            lines.extend(stmt.dump(indent + 2))
+
+        if self.exit_node is not None:
+            lines.extend(self.exit_node.dump(indent + 2))
+
+        return lines
+
+
+class IfNode(StmtNode):
+    def __init__(self, line, column, condition, then_block, else_block=None):
+        super().__init__(line, column)
+        self.condition = condition
+        self.then_block = then_block
+        self.else_block = else_block
+
+    def dump(self, indent=0):
+        lines = [" " * indent + "If"]
+
+        lines.extend(self.condition.dump(indent + 2))
+        lines.extend(self.then_block.dump(indent + 2))
+
+        if self.else_block is not None:
+            lines.extend(self.else_block.dump(indent + 2))
+
+        return lines
+
+class WhileNode(StmtNode):
+    def __init__(self, line, column, condition, body):
+        super().__init__(line, column)
+        self.condition = condition
+        self.body = body
+
+    def dump(self, indent=0):
+        lines = [" " * indent + "While"]
+
+        lines.extend(self.condition.dump(indent + 2))
+        lines.extend(self.body.dump(indent + 2))
+
+        return lines
+
+class NotNode(ExprNode):
+    def __init__(self, line, column, operand):
+        super().__init__(line, column)
+        self.operand = operand
+
+    def dump(self, indent=0):
+        lines = [" " * indent + "Not"]
+        lines.extend(self.operand.dump(indent + 2))
+        return lines
+
 class Parser:
     def __init__(self, lines):
         self.lines = lines
+        self.line_pos = 0
         self.toks = []
         self.pos = 0
 
@@ -209,25 +270,40 @@ class Parser:
             f"line {line}:{column}: {message}"
         )
 
-    def parse_program(self):
-        statements = []
-        exit_node = None
-        found_exit = False
+    def next_line(self):
+        while self.line_pos < len(self.lines):
+            toks = self.lines[self.line_pos]
+            self.line_pos += 1
 
-        for toks in self.lines:
             if not toks:
                 continue
 
             self.toks = toks
             self.pos = 0
+            return True
 
-            if found_exit:
-                tok = self.peek()
-                raise CompileError(
-                    f"line {tok.line}:{tok.column}: "
-                    "code after exit is not allowed"
-                )
+        self.toks = []
+        self.pos = 0
+        return False
 
+    def peek_line(self):
+        pos = self.line_pos
+
+        while pos < len(self.lines):
+            toks = self.lines[pos]
+
+            if toks:
+                return toks
+
+            pos += 1
+
+        return None
+
+    def parse_program(self):
+        statements = []
+        exit_node = None
+
+        while self.next_line():
             first = self.peek()
 
             if (
@@ -235,11 +311,26 @@ class Parser:
                 and first.text == "exit"
             ):
                 exit_node = self.parse_exit()
-                found_exit = True
-            else:
-                statements.append(
-                    self.parse_statement()
-                )
+
+                if self.peek() is not None:
+                    tok = self.peek()
+                    raise CompileError(
+                        f"line {tok.line}:{tok.column}: "
+                        f"unexpected '{tok.text}' after the statement"
+                    )
+
+                if self.peek_line() is not None:
+                    tok = self.peek_line()[0]
+                    raise CompileError(
+                        f"line {tok.line}:{tok.column}: "
+                        "code after exit is not allowed"
+                    )
+
+                break
+
+            statements.append(
+                self.parse_statement()
+            )
 
             if self.peek() is not None:
                 tok = self.peek()
@@ -276,10 +367,208 @@ class Parser:
         if tok.kind == "identifier":
             return self.parse_assign()
 
+        if (
+            tok.kind == "keyword"
+            and tok.text == "if"
+        ):
+            return self.parse_if()
+
+        if (
+            tok.kind == "keyword"
+            and tok.text == "while"
+        ):
+            return self.parse_while()
+
         raise CompileError(
             f"line {tok.line}:{tok.column}: "
             f"cannot start a statement with '{tok.text}'"
         )
+
+    def parse_if(self):
+        if_tok = self.expect_text(
+            "if",
+            "expected 'if'"
+        )
+
+        condition = self.parse_expr()
+
+        if self.peek() is not None:
+            tok = self.peek()
+            raise CompileError(
+                f"line {tok.line}:{tok.column}: "
+                f"unexpected '{tok.text}' after the statement"
+            )
+
+        if not self.next_line():
+            raise CompileError(
+                f"line {if_tok.line}:{if_tok.column}: "
+                "expected '{' on its own line after 'if'"
+            )
+
+        tok = self.peek()
+
+        if (
+            tok is None
+            or tok.kind != "lbrace"
+            or len(self.toks) != 1
+        ):
+            got = tok.text if tok is not None else "end"
+            raise CompileError(
+                f"line {if_tok.line + 1}:1: "
+                f"expected '{{' on its own line after 'if', got '{got}'"
+            )
+
+        then_block = self.parse_block()
+
+        else_block = None
+
+        next_tokens = self.peek_line()
+
+        if (
+            next_tokens is not None
+            and len(next_tokens) == 1
+            and next_tokens[0].kind == "keyword"
+            and next_tokens[0].text == "else"
+        ):
+            self.next_line()
+
+            if not self.next_line():
+                raise CompileError(
+                    f"line {if_tok.line}:1: "
+                    "expected '{' after 'else'"
+                )
+
+            tok = self.peek()
+
+            if (
+                tok is None
+                or tok.kind != "lbrace"
+                or len(self.toks) != 1
+            ):
+                raise CompileError(
+                    f"line {tok.line}:{tok.column}: "
+                    "expected '{' on its own line after 'else'"
+                )
+
+            else_block = self.parse_block()
+
+        return IfNode(
+            if_tok.line,
+            if_tok.column,
+            condition,
+            then_block,
+            else_block,
+        )
+
+    def parse_while(self):
+        while_tok = self.expect_text(
+            "while",
+            "expected 'while'"
+        )
+
+        condition = self.parse_expr()
+
+        if self.peek() is not None:
+            tok = self.peek()
+            raise CompileError(
+                f"line {tok.line}:{tok.column}: "
+                f"unexpected '{tok.text}' after the statement"
+            )
+
+        if not self.next_line():
+            raise CompileError(
+                f"line {while_tok.line}:{while_tok.column}: "
+                "expected '{' on its own line after 'while'"
+            )
+
+        tok = self.peek()
+
+        if (
+            tok is None
+            or tok.kind != "lbrace"
+            or len(self.toks) != 1
+        ):
+            got = tok.text if tok is not None else "end"
+            raise CompileError(
+                f"line {while_tok.line + 1}:1: "
+                f"expected '{{' on its own line after 'while', got '{got}'"
+            )
+
+        body = self.parse_block()
+
+        return WhileNode(
+            while_tok.line,
+            while_tok.column,
+            condition,
+            body,
+        )
+
+    def parse_block(self):
+        open_tok = self.peek()
+
+        self.eat()
+
+        if self.peek() is not None:
+            tok = self.peek()
+            raise CompileError(
+                f"line {tok.line}:{tok.column}: "
+                "unexpected token after '{'"
+            )
+
+        statements = []
+        exit_node = None
+
+        while True:
+            if not self.next_line():
+                raise CompileError(
+                    f"line {open_tok.line}:{open_tok.column}: "
+                    "'{' is never closed"
+                )
+
+            first = self.peek()
+
+            if (
+                first.kind == "rbrace"
+                and len(self.toks) == 1
+            ):
+                if not statements and exit_node is None:
+                    raise CompileError(
+                        f"line {open_tok.line}:{open_tok.column}: "
+                        "empty block"
+                    )
+
+                self.eat()
+
+                return BlockNode(
+                    open_tok.line,
+                    open_tok.column,
+                    statements,
+                    exit_node,
+                )
+
+            if exit_node is not None:
+                raise CompileError(
+                    f"line {first.line}:{first.column}: "
+                    "statement after 'exit' in the same block"
+                )
+
+            if (
+                first.kind == "keyword"
+                and first.text == "exit"
+            ):
+                exit_node = self.parse_exit()
+            else:
+                statements.append(
+                    self.parse_statement()
+                )
+
+            if self.peek() is not None:
+                tok = self.peek()
+
+                raise CompileError(
+                    f"line {tok.line}:{tok.column}: "
+                    f"unexpected '{tok.text}' after the statement"
+                )
 
     def parse_decl(self):
         type_tok = self.eat()
@@ -312,9 +601,17 @@ class Parser:
                 f"variable '{name.text}' needs an initialiser in {{}}"
             )
 
-        self.eat()
+        open_brace = self.eat()
 
         init = self.parse_expr()
+
+        tok = self.peek()
+
+        if tok is None:
+            raise CompileError(
+                f"line {open_brace.line}:{open_brace.column}: "
+                "'{' is not closed before the end of the line"
+            )
 
         self.expect_kind(
             "rbrace",
@@ -465,6 +762,20 @@ class Parser:
                 "expected a constant or a variable"
             )
 
+        if (
+            tok.kind == "operator"
+            and tok.text == "!"
+        ):
+            self.eat()
+
+            operand = self.parse_factor()
+
+            return NotNode(
+                tok.line,
+                tok.column,
+                operand,
+            )
+
         if tok.kind == "number":
             self.eat()
 
@@ -503,7 +814,17 @@ class Parser:
 
 class SemanticChecker:
     def __init__(self):
-        self.symbols = {}
+        self.scopes = [{}]
+
+    def lookup(self, node, name):
+        for frame in reversed(self.scopes):
+            if name in frame:
+                return frame[name]
+
+        raise CompileError(
+            f"line {node.line}:{node.column}: "
+            f"variable '{name}' is used before its declaration"
+        )
 
     def check(self, program):
         for stmt in program.statements:
@@ -517,6 +838,12 @@ class SemanticChecker:
 
         if isinstance(node, AssignNode):
             return self.visit_assign(node)
+
+        if isinstance(node, IfNode):
+            return self.visit_if(node)
+
+        if isinstance(node, WhileNode):
+            return self.visit_while(node)
 
         raise CompileError(
             f"line {node.line}:{node.column}: unknown statement"
@@ -534,6 +861,9 @@ class SemanticChecker:
 
         if isinstance(node, BinOpNode):
             return self.visit_binop(node)
+
+        if isinstance(node, NotNode):
+            return self.visit_not(node)
 
         raise CompileError(
             f"line {node.line}:{node.column}: unknown expression"
@@ -557,22 +887,21 @@ class SemanticChecker:
         return node.type
 
     def visit_var(self, node):
-        if node.name not in self.symbols:
-            raise CompileError(
-                f"line {node.line}:{node.column}: "
-                f"variable '{node.name}' is used before its declaration"
-            )
+        node.decl = self.lookup(
+            node,
+            node.name,
+        )
 
-        node.decl = self.symbols[node.name]
         node.type = node.decl.type_name
-
         return node.type
 
     def visit_decl(self, node):
-        if node.name in self.symbols:
+        frame = self.scopes[-1]
+
+        if node.name in frame:
             raise CompileError(
                 f"line {node.line}:{node.column}: "
-                f"variable '{node.name}' is already declared"
+                f"variable '{node.name}' is already declared in this block"
             )
 
         self.visit_expr(node.init)
@@ -584,16 +913,13 @@ class SemanticChecker:
             f"initialise '{node.name}'"
         )
 
-        self.symbols[node.name] = node
+        frame[node.name] = node
 
     def visit_assign(self, node):
-        if node.name not in self.symbols:
-            raise CompileError(
-                f"line {node.line}:{node.column}: "
-                f"variable '{node.name}' is used before its declaration"
-            )
-
-        decl = self.symbols[node.name]
+        decl = self.lookup(
+            node,
+            node.name,
+        )
 
         if not decl.mutable:
             raise CompileError(
@@ -611,6 +937,67 @@ class SemanticChecker:
             node,
             f"assign to '{node.name}'"
         )
+
+    def visit_block(self, node):
+        self.scopes.append({})
+
+        try:
+            for stmt in node.statements:
+                self.visit_stmt(stmt)
+
+            if node.exit_node is not None:
+                self.visit_exit(node.exit_node)
+        finally:
+            self.scopes.pop()
+
+    def visit_if(self, node):
+        condition_type = self.visit_expr(
+            node.condition
+        )
+
+        if condition_type != "bool":
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"the condition of 'if' must be bool, got {condition_type}"
+            )
+
+        self.visit_block(
+            node.then_block
+        )
+
+        if node.else_block is not None:
+            self.visit_block(
+                node.else_block
+            )
+
+    def visit_while(self, node):
+        condition_type = self.visit_expr(
+            node.condition
+        )
+
+        if condition_type != "bool":
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"the condition of 'while' must be bool, got {condition_type}"
+            )
+
+        self.visit_block(
+            node.body
+        )
+
+    def visit_not(self, node):
+        operand_type = self.visit_expr(
+            node.operand
+        )
+
+        if operand_type != "bool":
+            raise CompileError(
+                f"line {node.line}:{node.column}: "
+                f"cannot apply '!' to {operand_type}"
+            )
+
+        node.type = "bool"
+        return node.type
 
     def visit_binop(self, node):
         left_type = self.visit_expr(node.left)
@@ -768,6 +1155,12 @@ class CodeGen:
         if isinstance(node, AssignNode):
             return self.visit_assign(node)
 
+        if isinstance(node, IfNode):
+            return self.visit_if(node)
+
+        if isinstance(node, WhileNode):
+            return self.visit_while(node)
+
         raise CompileError(
             f"line {node.line}:{node.column}: unknown statement"
         )
@@ -791,6 +1184,9 @@ class CodeGen:
         if isinstance(node, BinOpNode):
             return self.visit_binop(node)
 
+        if isinstance(node, NotNode):
+            return self.visit_not(node)
+
         raise CompileError(
             f"line {node.line}:{node.column}: unknown expression"
         )
@@ -801,6 +1197,15 @@ class CodeGen:
         return self.builder.load(
             ptr,
             name=f"load_{node.name}",
+        )
+
+    def visit_not(self, node):
+        value = self.visit_expr(node.operand)
+
+        return self.builder.xor(
+            value,
+            ir.Constant(I1, 1),
+            name="nottmp",
         )
 
     def visit_binop(self, node):
@@ -879,6 +1284,25 @@ class CodeGen:
             f"unknown operator '{node.op}'"
         )
 
+    def create_entry_alloca(self, type_name, name):
+        current_block = self.builder.block
+        function = current_block.function
+        entry = function.entry_basic_block
+
+        alloca_builder = ir.IRBuilder(entry)
+        alloca_builder.position_at_start(entry)
+
+        ptr = alloca_builder.alloca(
+            self.llvm_type(type_name),
+            name=name,
+        )
+
+        self.builder.position_at_end(
+            current_block
+        )
+
+        return ptr
+
     def visit_decl(self, node):
         value = self.visit_expr(node.init)
 
@@ -888,9 +1312,9 @@ class CodeGen:
             node.type_name,
         )
 
-        ptr = self.builder.alloca(
-            self.llvm_type(node.type_name),
-            name=node.name,
+        ptr = self.create_entry_alloca(
+            node.type_name,
+            node.name,
         )
 
         self.builder.store(
@@ -912,6 +1336,120 @@ class CodeGen:
         self.builder.store(
             value,
             self.storage[node.decl],
+        )
+
+    def visit_block(self, node):
+        for stmt in node.statements:
+            self.visit_stmt(stmt)
+
+        if node.exit_node is not None:
+            self.visit_exit(node.exit_node)
+
+    def visit_if(self, node):
+        condition = self.visit_expr(
+            node.condition
+        )
+
+        function = self.builder.block.function
+
+        then_bb = function.append_basic_block(
+            "then"
+        )
+
+        if node.else_block is not None:
+            else_bb = function.append_basic_block(
+                "else"
+            )
+        else:
+            else_bb = None
+
+        merge_bb = function.append_basic_block(
+            "merge"
+        )
+
+        self.builder.cbranch(
+            condition,
+            then_bb,
+            else_bb if else_bb is not None else merge_bb,
+        )
+
+        self.builder.position_at_end(
+            then_bb
+        )
+
+        self.visit_block(
+            node.then_block
+        )
+
+        if not self.builder.block.is_terminated:
+            self.builder.branch(
+                merge_bb
+            )
+
+        if else_bb is not None:
+            self.builder.position_at_end(
+                else_bb
+            )
+
+            self.visit_block(
+                node.else_block
+            )
+
+            if not self.builder.block.is_terminated:
+                self.builder.branch(
+                    merge_bb
+                )
+
+        self.builder.position_at_end(
+            merge_bb
+        )
+
+    def visit_while(self, node):
+        function = self.builder.block.function
+
+        cond_bb = function.append_basic_block(
+            "while.cond"
+        )
+        body_bb = function.append_basic_block(
+            "while.body"
+        )
+        end_bb = function.append_basic_block(
+            "while.end"
+        )
+
+        self.builder.branch(
+            cond_bb
+        )
+
+        self.builder.position_at_end(
+            cond_bb
+        )
+
+        condition = self.visit_expr(
+            node.condition
+        )
+
+        self.builder.cbranch(
+            condition,
+            body_bb,
+            end_bb,
+        )
+
+        self.builder.position_at_end(
+            body_bb
+        )
+
+        self.visit_block(
+            node.body
+        )
+
+        if not self.builder.block.is_terminated:
+            self.builder.branch(
+                cond_bb
+            )
+
+        self.builder.position_at_end(
+            end_bb
         )
 
     def visit_exit(self, node):
@@ -990,6 +1528,9 @@ KEYWORDS = {
     "exit": "keyword",
     "true": "keyword",
     "false": "keyword",
+    "if": "keyword",
+    "else": "keyword",
+    "while": "keyword",
 }
 
 
@@ -1019,9 +1560,6 @@ def lex(data: bytes):
     start_line = 1
     start_col = 1
 
-    open_brace_line = None
-    open_brace_col = None
-
     while i <= len(data):
         b = data[i] if i < len(data) else None
 
@@ -1035,12 +1573,6 @@ def lex(data: bytes):
                 continue
 
             if b == 10:
-                if open_brace_line is not None:
-                    raise CompileError(
-                        f"line {open_brace_line}:{open_brace_col}: "
-                        "'{' is not closed before the end of the line"
-                    )
-
                 lines.append(tokens)
                 tokens = []
 
@@ -1074,25 +1606,15 @@ def lex(data: bytes):
                     Token("lbrace", "{", line, col)
                 )
 
-                open_brace_line = line
-                open_brace_col = col
-
                 i += 1
                 col += 1
                 continue
 
             if b == ord("}"):
-                if open_brace_line is None:
-                    raise CompileError(
-                        f"line {line}:{col}: unexpected byte '}}'"
-                    )
 
                 tokens.append(
                     Token("rbrace", "}", line, col)
                 )
-
-                open_brace_line = None
-                open_brace_col = None
 
                 i += 1
                 col += 1
@@ -1264,16 +1786,17 @@ def lex(data: bytes):
                 state = "START"
                 continue
 
-            raise CompileError(
-                f"line {start_line}:{start_col}: "
-                "expected '!=' (a single '!' is not an operator)"
+            tokens.append(
+                Token(
+                    "operator",
+                    "!",
+                    start_line,
+                    start_col,
+                )
             )
 
-    if open_brace_line is not None:
-        raise CompileError(
-            f"line {open_brace_line}:{open_brace_col}: "
-            "'{' is not closed before the end of the line"
-        )
+            state = "START"
+            continue
 
     if tokens:
         lines.append(tokens)

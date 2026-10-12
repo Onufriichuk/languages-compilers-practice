@@ -1,0 +1,35 @@
+Practice 5 Warm-up
+
+Program declarations:
+1. outer x: i32 mut x{10}
+2. middle x: bool mut x{true}
+3. inner x: i64 mut x{20}
+
+Exit resolution:
+1. The innermost `exit x` refers to the i64 x declared as `i64 mut x{20}`.
+   It prints 20.
+
+2. The `exit x` in the outer if block refers to the bool x declared as
+   `bool mut x{true}`.
+   It would print true, but it is not reached because the inner exit terminates the program.
+
+3. The final `exit x` refers to the outer i32 x declared as `i32 mut x{10}`.
+   It would print 10, but it is not reached.
+
+Actual program output:
+Program exit with result 20
+
+Scopes:
+- The outer if block pushes one frame and pops one frame.
+- The nested if block pushes one frame and pops one frame.
+- Total block-scope operations: 2 pushes and 2 pops.
+- Maximum active scope depth including the global frame: 3 frames.
+
+Basic blocks:
+- entry
+- outer then
+- outer merge
+- inner then
+- inner merge
+
+Total: 5 basic blocks including entry

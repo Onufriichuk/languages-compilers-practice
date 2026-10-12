@@ -1,21 +1,28 @@
-# Practice 4
+## Practice 5 — if/else, scopes and basic blocks
 
-In this practice, the compiler was extended with new types and semantic checks.
+Practice 5 adds control flow, nested scopes, logical negation, and LLVM basic blocks.
 
-Implemented:
-- support for `i64` and `bool`
-- boolean literals `true` and `false`
-- comparison operators `==` and `!=`
-- declaration types in the AST
-- a separate `SemanticChecker`
-- type checking for arithmetic, comparisons, declarations and assignments
-- widening from `i32` to `i64`
-- LLVM `sext` generation
-- boolean values represented as `i1`
-- boolean and integer support in `exit`
+### Implemented features
 
-Testing:
-- Practice 4 tests: 12/12 passed
-- Previous tests: 19/19 passed
+- `if` statements
+- optional `else` blocks
+- nested `if` statements
+- multi-line `{ ... }` blocks
+- logical negation with `!`
+- block scope stack
+- variable shadowing, including shadowing with a different type
+- boolean type checking for `if` conditions
+- boolean type checking for `!`
+- LLVM `then`, `else`, and `merge` basic blocks
+- conditional branches with `cbranch`
+- entry-block `alloca` instructions
+- `exit` inside an if/else arm
+- LLVM `mem2reg` support producing phi nodes
+- additional `while` loop implementation with condition, body, and end blocks
 
-The compiler supports `--ast`, semantic validation before code generation, and LLVM IR generation for the new types and operations.
+### Running the compiler
+
+Compile a program:
+
+```bash
+python3 compiler.py input.txt output.ll

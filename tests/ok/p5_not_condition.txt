@@ -1,0 +1,6 @@
+bool b{false}
+if !b
+{
+exit 1
+}
+exit 0

@@ -1,0 +1,10 @@
+i32 mut x{10}
+if true
+{
+bool b{true}
+if b
+{
+x := 20
+}
+}
+exit x
