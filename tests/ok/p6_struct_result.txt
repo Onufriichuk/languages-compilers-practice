@@ -1,0 +1,13 @@
+struct Point
+{
+i32 mut x
+i32 mut y
+}
+fn moved := (Point p) -> Point
+{
+Point q{p.x + 1, p.y}
+exit q
+}
+Point p{10, 20}
+Point q{moved(p)}
+exit q.x

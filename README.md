@@ -1,28 +1,36 @@
-## Practice 5 — if/else, scopes and basic blocks
+## Practice 6 — Structs and Functions
 
-Practice 5 adds control flow, nested scopes, logical negation, and LLVM basic blocks.
+Implemented:
 
-### Implemented features
+- Struct declarations with built-in and previously declared struct field types
+- Mutable and constant struct fields
+- Struct object initialization
+- Struct copying
+- Field access and nested field chains
+- Field assignment with mutability checks
+- Functions with parameters and result types
+- Function calls and nested calls
+- Recursive functions
+- Calls to functions declared later in the program
+- Struct parameters and struct return values
+- i32 to i64 argument widening
+- Program order validation: structs, functions, statements, exit
+- Nested struct initialization using `{}` inside `{}` (additional task)
+- LLVM struct generation with named types, `alloca`, `getelementptr`
+- LLVM function definitions, calls and returns
+- Nested struct values generated with `insertvalue`
 
-- `if` statements
-- optional `else` blocks
-- nested `if` statements
-- multi-line `{ ... }` blocks
-- logical negation with `!`
-- block scope stack
-- variable shadowing, including shadowing with a different type
-- boolean type checking for `if` conditions
-- boolean type checking for `!`
-- LLVM `then`, `else`, and `merge` basic blocks
-- conditional branches with `cbranch`
-- entry-block `alloca` instructions
-- `exit` inside an if/else arm
-- LLVM `mem2reg` support producing phi nodes
-- additional `while` loop implementation with condition, body, and end blocks
+### Practice 6 tests
 
-### Running the compiler
-
-Compile a program:
+Run:
 
 ```bash
-python3 compiler.py input.txt output.ll
+python3 run_tests_practice6.py
+
+Current result:
+15/15 tests passed
+
+Previous practice tests also continue to pass:
+run_tests.py: 19/19
+run_tests_practice4.py: 24/24
+
