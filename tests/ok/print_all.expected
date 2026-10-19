@@ -1,0 +1,5 @@
+literal %s
+Point{x: 3, flag: true}
+6000000000
+false
+Program exit with result 0
