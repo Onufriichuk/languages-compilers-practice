@@ -1,0 +1,10 @@
+fn identity := (i32 n) -> i32
+{
+ exit n
+}
+fn square := [](i32 n) -> i32
+{
+ exit n * n
+}
+print(identity(square))
+exit 0
