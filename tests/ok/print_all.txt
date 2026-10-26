@@ -1,0 +1,12 @@
+struct Point
+{
+ i32 x
+ bool flag
+}
+Point p{3, true}
+i64 big{6000000000}
+print("literal %s")
+print(p)
+print(big)
+print(false)
+exit 0

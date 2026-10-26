@@ -1,0 +1,4 @@
+i32 a{read()}
+print("number:")
+print(a)
+exit a

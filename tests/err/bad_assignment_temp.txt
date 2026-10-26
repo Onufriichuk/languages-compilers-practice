@@ -1,0 +1,12 @@
+struct P
+{
+ i32 x
+ fn moved := () -> P
+ {
+  P a{x}
+  exit a
+ }
+}
+P p{1}
+p.moved().x := 5
+exit 0
