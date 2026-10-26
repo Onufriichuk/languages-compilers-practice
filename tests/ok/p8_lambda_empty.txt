@@ -1,0 +1,10 @@
+fn square := (i32 v) -> i32
+{
+ exit v * v
+}
+fn caller := [](i32 v) -> i32
+{
+ exit square(v)
+}
+print(caller(7))
+exit 0

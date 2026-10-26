@@ -1,0 +1,11 @@
+i32 mut i{0}
+while i != 3
+{
+ fn copy := [i]() -> i32
+ {
+  exit i
+ }
+ print(copy())
+ i := i + 1
+}
+exit i
