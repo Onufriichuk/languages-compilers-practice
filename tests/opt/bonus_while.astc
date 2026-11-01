@@ -1,0 +1,14 @@
+Program
+  Function loop -> i32
+    Block
+      While
+        Bool false
+        Block
+          Print
+            Const 1
+      Exit
+        Const 1
+  Decl unused i32 const
+    Call loop
+  Exit
+    Const 0

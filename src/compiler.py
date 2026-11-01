@@ -986,7 +986,6 @@ class Parser:
                 ):
                     return self.parse_decl()
 
-            # A call expression alone is not a statement.
             return self.parse_assign()
 
         if (
@@ -1650,7 +1649,6 @@ class SemanticChecker:
         self.current_function_result = None
 
         self.visit_exit(program.exit_node)
-        # Propagate mutation through mutually recursive member calls.
         changed = True
         while changed:
             changed = False
@@ -1855,7 +1853,6 @@ class SemanticChecker:
             self.visit_function(method)
         finally:
             self.current_struct, self.active_member, self.forbidden_outer = old_struct, old_active, old_forbidden
-        # Captures were already resolved before the lambda became visible.
         frame[node.name] = decl
         return None
 
@@ -4061,7 +4058,217 @@ def parse_exit(
     )
 
 
-def compile_program(source_path, output_path):
+"""Practice 9 AST optimization. Runs only after the semantic checker."""
+from collections import defaultdict
+
+# Imported from the existing compiler, not a separate compilation pipeline.
+
+def children(n):
+    if isinstance(n, ProgramNode):
+        return [*n.structs, *n.functions, *n.statements, n.exit_node]
+    if isinstance(n, StructNode):
+        return list(n.methods)
+    if isinstance(n, FunctionNode):
+        return [n.body]
+    if isinstance(n, LambdaNode):
+        # Semantic checking lowered the lambda to a generated local declaration.
+        return [n.generated_decl] if hasattr(n, 'generated_decl') else [n.function.body]
+    if isinstance(n, BlockNode):
+        return [*n.statements, n.exit_node]
+    if isinstance(n, DeclNode):
+        return [n.init]
+    if isinstance(n, AssignNode):
+        return [n.value]  # The assignment destination is not a read.
+    if isinstance(n, (ExitNode, PrintNode)):
+        return [n.value]
+    if isinstance(n, NotNode):
+        return [n.operand]
+    if isinstance(n, (InitListNode, StructInitNode)):
+        return list(n.values)
+    if isinstance(n, BinOpNode):
+        return [n.left, n.right]
+    if isinstance(n, IfNode):
+        return [n.condition, n.then_block, n.else_block]
+    if isinstance(n, WhileNode):
+        return [n.condition, n.body]
+    if isinstance(n, CallNode):
+        return list(n.args) + ([n.callable_member.receiver] if hasattr(n, 'callable_member') else [])
+    if isinstance(n, MemberCallNode):
+        return [n.receiver, *n.args]
+    if isinstance(n, ChainFieldNode):
+        return [n.receiver]
+    return []
+
+
+def walk(node):
+    if node is None:
+        return
+    yield node
+    for child in children(node):
+        yield from walk(child)
+
+
+def destination(stmt):
+    target = stmt.target
+    if isinstance(target, (VarNode, FieldAccessNode)):
+        return getattr(target, 'decl', None)
+    if isinstance(target, ChainFieldNode):
+        receiver = target.receiver
+        while isinstance(receiver, ChainFieldNode):
+            receiver = receiver.receiver
+        return getattr(receiver, 'decl', None)
+    return None
+
+
+def called_functions(node):
+    for n in walk(node):
+        if isinstance(n, CallNode):
+            if hasattr(n, 'function'):
+                yield n.function
+            if hasattr(n, 'member_function'):
+                yield n.member_function
+            if hasattr(n, 'callable_member'):
+                call = n.callable_member
+                yield getattr(call, 'method', None)
+        elif isinstance(n, MemberCallNode):
+            yield getattr(n, 'method', None)
+
+
+class EffectAnalyzer:
+    """Conservative transitive effects, including recursion and nontermination."""
+    def __init__(self, tree):
+        functions = [n for n in walk(tree) if isinstance(n, FunctionNode)]
+        self.functions = list({id(n): n for n in functions}.values())
+        self.edges = {f: set(x for x in called_functions(f.body) if x is not None) for f in self.functions}
+        # Method effects include mutations. Direct print/read and while are observable.
+        self.effects = set()
+        for f in self.functions:
+            if getattr(f, 'mutating', False) or any(isinstance(n, (PrintNode, WhileNode)) or
+                    (isinstance(n, CallNode) and n.name == 'read' and not hasattr(n, 'callable_member'))
+                    for n in walk(f.body)):
+                self.effects.add(f)
+        # A recursive call (direct or indirect) can fail to return.
+        def recursive(origin, current, seen):
+            for dest in self.edges.get(current, ()):
+                if dest is origin:
+                    return True
+                if dest not in seen and recursive(origin, dest, seen | {dest}):
+                    return True
+            return False
+        for f in self.functions:
+            if recursive(f, f, {f}):
+                self.effects.add(f)
+        changed = True
+        while changed:
+            old = len(self.effects)
+            self.effects.update(f for f in self.functions if self.edges[f] & self.effects)
+            changed = len(self.effects) != old
+
+    def has_effect(self, node):
+        for n in walk(node):
+            if isinstance(n, CallNode):
+                if n.name == 'read' and not hasattr(n, 'callable_member'):
+                    return True
+                if hasattr(n, 'function') and n.function in self.effects:
+                    return True
+                if hasattr(n, 'member_function') and n.member_function in self.effects:
+                    return True
+                if hasattr(n, 'callable_member'):
+                    method = getattr(n.callable_member, 'method', None)
+                    if method is None or method in self.effects:
+                        return True
+            elif isinstance(n, MemberCallNode):
+                method = getattr(n, 'method', None)
+                if method is None or method in self.effects:
+                    return True
+        return False
+
+
+class UseCounter:
+    def __init__(self, effects):
+        self.reads = defaultdict(int)
+        self.decls = {}
+        self.effects = effects
+        self.calls = defaultdict(int)
+
+    def read(self, decl):
+        if isinstance(decl, DeclNode):
+            self.reads[id(decl)] += 1
+
+    def visit(self, node):
+        if node is None:
+            return
+        if isinstance(node, DeclNode):
+            self.decls[id(node)] = node
+            self.reads[id(node)] += 0
+            if self.effects.has_effect(node.init):
+                self.read(node)
+        elif isinstance(node, AssignNode):
+            # A side-effecting RHS must not be erased even when its target is dead.
+            if self.effects.has_effect(node.value):
+                self.read(destination(node))
+        elif isinstance(node, (VarNode, FieldAccessNode)):
+            self.read(getattr(node, 'decl', None))
+        elif isinstance(node, CallNode):
+            if hasattr(node, 'function'):
+                self.calls[id(node.function)] += 1
+        elif isinstance(node, MemberCallNode):
+            pass
+        if isinstance(node, AssignNode):
+            self.visit(node.value)
+        else:
+            for child in children(node):
+                self.visit(child)
+
+
+class Pruner:
+    def __init__(self, dead_decls, dead_functions):
+        self.dead_decls = dead_decls
+        self.dead_functions = dead_functions
+        self.changed = False
+
+    def prune(self, tree):
+        new_functions = [f for f in tree.functions if id(f) not in self.dead_functions]
+        if len(new_functions) != len(tree.functions):
+            self.changed = True
+        tree.functions = new_functions
+        self.visit(tree)
+        return self.changed
+
+    def visit(self, node):
+        if node is None:
+            return
+        if isinstance(node, (ProgramNode, BlockNode)):
+            kept = []
+            for stmt in node.statements:
+                decl = stmt.generated_decl if isinstance(stmt, LambdaNode) and hasattr(stmt, 'generated_decl') else stmt
+                if isinstance(decl, DeclNode) and id(decl) in self.dead_decls:
+                    self.changed = True
+                    continue
+                if isinstance(stmt, AssignNode) and id(destination(stmt)) in self.dead_decls:
+                    self.changed = True
+                    continue
+                kept.append(stmt)
+            node.statements = kept
+        for child in children(node):
+            self.visit(child)
+
+
+def remove_unused(tree):
+    """Iterate AST use-counting and pruning to a fixpoint."""
+    while True:
+        effects = EffectAnalyzer(tree)
+        counter = UseCounter(effects)
+        counter.visit(tree)
+        dead_decls = {key for key in counter.decls if counter.reads[key] == 0}
+        dead_functions = {id(f) for f in tree.functions if counter.calls[id(f)] == 0}
+        if not dead_decls and not dead_functions:
+            return tree
+        if not Pruner(dead_decls, dead_functions).prune(tree):
+            return tree
+
+
+def compile_program(source_path, output_path, remove_unused_flag=False):
     with open(source_path, "rb") as f:
         data = f.read()
 
@@ -4072,6 +4279,8 @@ def compile_program(source_path, output_path):
 
     checker = SemanticChecker()
     checker.check(tree)
+    if remove_unused_flag:
+        remove_unused(tree)
 
     module = ir.Module(name="practice3")
     module.triple = llvm.get_default_triple()
@@ -4135,87 +4344,33 @@ def compile_program(source_path, output_path):
         f.write(str(module))
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] in {"--ast", "--ast-checked"}:
-        source_path = sys.argv[2]
-
-        try:
-            with open(source_path, "rb") as f:
-                data = f.read()
-
-            token_lines = lex(data)
-
-            parser = Parser(token_lines)
-            tree = parser.parse_program()
-            if sys.argv[1] == "--ast-checked":
-                SemanticChecker().check(tree)
-            for line in tree.dump():
-                print(line)
-
-        except CompileError as e:
-            print(
-                f"compilation error: {e}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        except FileNotFoundError:
-            print(
-                f"compilation error: source file "
-                f"'{source_path}' not found",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        return
-
-    if len(sys.argv) != 3:
-        print(
-            "usage:",
-            file=sys.stderr,
-        )
-        print(
-            "  python3 compiler.py <source> <output.ll>",
-            file=sys.stderr,
-        )
-        print(
-            "  python3 compiler.py --ast <source>",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    source_path = sys.argv[1]
-    output_path = sys.argv[2]
-
-    if os.path.exists(output_path):
-        os.remove(output_path)
-
+    args = sys.argv[1:]
+    optimized = '--remove-unused' in args
+    args = [a for a in args if a != '--remove-unused']
+    ast_mode = next((a for a in args if a in ('--ast', '--ast-checked')), None)
     try:
-        compile_program(
-            source_path,
-            output_path,
-        )
-
-    except CompileError as e:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-        print(
-            f"compilation error: {e}",
-            file=sys.stderr,
-        )
-
-        sys.exit(1)
-
-    except FileNotFoundError:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-        print(
-            f"compilation error: source file "
-            f"'{source_path}' not found",
-            file=sys.stderr,
-        )
-
+        if ast_mode is not None:
+            if len(args) != 2 or args.count(ast_mode) != 1:
+                raise ValueError('usage: compiler.py [--remove-unused] --ast-checked source.txt')
+            source_path = next(a for a in args if a != ast_mode)
+            with open(source_path, 'rb') as f:
+                tree = Parser(lex(f.read())).parse_program()
+            if ast_mode == '--ast-checked':
+                SemanticChecker().check(tree)
+                if optimized:
+                    remove_unused(tree)
+            print('\n'.join(tree.dump()))
+        else:
+            if len(args) != 2:
+                raise ValueError('usage: compiler.py [--remove-unused] source.txt output.ll')
+            source_path, output_path = args
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            compile_program(source_path, output_path, optimized)
+    except (CompileError, FileNotFoundError, ValueError) as exc:
+        if ast_mode is None and len(args) == 2 and os.path.exists(args[1]):
+            os.remove(args[1])
+        print(f'compilation error: {exc}', file=sys.stderr)
         sys.exit(1)
 
 

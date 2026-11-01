@@ -1,0 +1,13 @@
+i32 x{4}
+fn quiet := [x]() -> i32
+{
+ exit x * x
+}
+i32 a{quiet()}
+fn loud := [x]() -> i32
+{
+ print(x)
+ exit x
+}
+i32 b{loud()}
+exit 0

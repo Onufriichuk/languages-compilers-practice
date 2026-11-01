@@ -1,0 +1,21 @@
+Program
+  Function recurse -> i32
+    Param x i32
+    Block
+      If
+        BinOp !=
+          Var x
+          Const 0
+        Block
+          Exit
+            Call recurse
+              BinOp -
+                Var x
+                Const 1
+      Exit
+        Const 0
+  Decl a i32 const
+    Call recurse
+      Const 3
+  Exit
+    Const 0
