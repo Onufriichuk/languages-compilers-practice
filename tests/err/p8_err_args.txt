@@ -1,0 +1,11 @@
+struct Scale
+{
+ i32 k
+ fn call := (i32 x) -> i32
+ {
+  exit k * x
+ }
+}
+Scale s{2}
+print(s())
+exit 0

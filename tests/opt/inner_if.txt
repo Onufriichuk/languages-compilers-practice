@@ -1,0 +1,7 @@
+i32 mut result{4}
+if true
+{
+ i32 dead{9}
+ result := result + 2
+}
+exit result

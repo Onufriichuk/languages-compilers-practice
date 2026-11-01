@@ -1,0 +1,8 @@
+i32 k{7}
+fn advance := [mut k]() -> i32
+{
+ k := k + 1
+ exit k
+}
+print(advance())
+exit k

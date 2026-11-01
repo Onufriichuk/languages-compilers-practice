@@ -1,0 +1,10 @@
+fn loop := () -> i32
+{
+ while false
+ {
+  print(1)
+ }
+ exit 1
+}
+i32 unused{loop()}
+exit 0

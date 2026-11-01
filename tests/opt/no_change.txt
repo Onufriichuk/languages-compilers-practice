@@ -1,0 +1,3 @@
+i32 a{4}
+print(a)
+exit a

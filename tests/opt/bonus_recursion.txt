@@ -1,0 +1,10 @@
+fn recurse := (i32 x) -> i32
+{
+ if x != 0
+ {
+  exit recurse(x - 1)
+ }
+ exit 0
+}
+i32 a{recurse(3)}
+exit 0

@@ -1,0 +1,10 @@
+i32 a{2}
+i32 b{3}
+fn step := [a, mut b]() -> i32
+{
+ b := b + a
+ exit b
+}
+print(step())
+print(step())
+exit b

@@ -1,151 +1,85 @@
-# Languages and Compilers Design — Practice 7
+# Languages and Compilers — Practice 9
 
 ## Overview
 
-This project implements a compiler for a small programming language using Python and `llvmlite`.
+Practice 9 extends the compiler from Practice 8 with an AST optimization pass that removes unused variables and global functions.
+The optimization runs after semantic checking and before LLVM code generation. The compiler is written in Python and uses `llvmlite.ir` to generate LLVM IR.
+The additional task implements effect analysis to identify function calls that can be safely removed when their results are unused.
+All functionality from previous practices is preserved.
 
-Practice 7 extends the compiler from the previous practices by adding member functions inside structures, field access and mutation rules, built-in input/output operations, and chained function calls.
+## Practice 9 — Optimizations
 
-The compiler generates LLVM IR, which can be executed using `lli`.
+The compiler supports the `--remove-unused` flag. This flag enables optimization of the checked AST before code generation.
+Without this flag, the compiler works as before. The flag can be placed anywhere in the command-line arguments.
 
-## Features
+### Task 1 — Unused Variables
 
-The compiler supports:
+`UseCounter` walks through the AST and counts how many times each variable is read.
+Variables are tracked by their declaration identity using `id(decl)`, not just by their names. This allows the compiler to correctly handle variables with the same name in different scopes.
+Assignment targets are not counted as reads.
+`Pruner` removes unused variable declarations and assignments to those variables from the AST.
+The optimization repeats until no more declarations can be removed.
+Variables are preserved when their initializers or assignments contain observable side effects. Function parameters and structure fields are not removed.
 
-- Basic types: `i32`, `i64`, and `bool`.
-- User-defined structures with typed fields.
-- Mutable (`mut`) and immutable variables and fields.
-- Variable declarations and assignments.
-- Arithmetic and comparison operations.
-- Conditional statements (`if`, `else`) and `while` loops.
-- Global functions with parameters and return values.
-- Member functions declared inside structures.
-- Member function calls and nested field access.
-- Type checking and mutation rules.
-- Built-in `read()` and `print()` operations.
-- Chained calls on temporary structure values (additional task).
-- AST output using `--ast`.
-- LLVM IR generation using `llvmlite.ir`.
+### Task 2 — Unused Functions
 
-## Practice 7 Implementation
+The optimization also identifies global functions that are never called.
+Unused global function definitions are removed together with their bodies.
+The process repeats because removing one function may make another function unused.
+Member functions and generated lambda methods are preserved.
 
-### Task 1 — Member Functions
+### Task 3 — Tests and Memory Management
 
-Structures can contain member functions after their field declarations.
+The `tests/opt` directory contains optimization tests covering:
 
-Member functions are called on structure objects using dot notation.
+- Unused variable chains
+- Variable shadowing
+- Unused global functions
+- Variables inside `if` blocks
+- Function calls with observable effects
+- Programs where nothing should be removed
+- Assignments to unused variables
+- Additional bonus cases
 
-Example:
+Each test contains three files:
 
-```text
-struct Point
-{
-    i32 mut x
-    i32 mut y
+- `.txt` — source program
+- `.astc` — expected optimized checked AST
+- `.expected` — expected program output or exit result
 
-    fn d2 := () -> i32
-    {
-        i32 r{x * x + y * y}
-        exit r
-    }
-}
+The test runner checks the new optimization tests and previous programs in `tests/ok` and `tests/err` with and without the optimization flag.
 
-Point p{3, 4}
-i32 result{p.d2()}
-exit result
-```
+### Memory Management
 
-Expected output:
+The compiler is implemented in Python, which uses reference counting and cyclic garbage collection.
+AST nodes in this compiler do not store pointers to their parent nodes.
+When the optimization removes a node from the AST and no other strong references remain, Python can release that object.
+If parent pointers existed, they could create reference cycles that would require the cyclic garbage collector.
+The `measure_practice9_gc.py` script uses `weakref.ref()` to check whether a removed AST node is released.
+The experiment showed that the weak reference returned `None` after the removed node had no remaining strong references.
+This concerns memory used by the compiler itself, not memory management in compiled programs.
 
-```text
-Program exit with result 25
-```
+### Known Limitations
 
-The compiler supports member function calls on nested structure fields, such as `c.center.d2()`.
+A variable that only reads itself, for example `k := k + 1`, may remain because its own assignment counts as a read.
+Two unused functions that call each other may also remain because each function has a call.
+The optimization prefers keeping unnecessary code rather than removing code that might affect observable program behavior.
 
-### Task 2 — Name Resolution, Mutation and Code Generation
+### Additional Task — Calls Without Effects
 
-Inside a member function, parameters and local variables take priority over structure fields.
+`EffectAnalyzer` checks whether function calls have observable effects.
 
-Member functions can access fields of their object directly and call other member functions of the same structure.
+The analysis considers:
 
-Mutating member functions can only be called through mutable objects and mutable field chains.
+- Functions that use `print()` or `read()`
+- Member functions that modify their objects
+- Functions containing `while` loops
+- Recursive functions
+- Functions that call other functions with effects
 
-The compiler checks these rules during semantic analysis.
-
-In LLVM IR, a member function receives a pointer to its object as an implicit first argument (`this`).
-
-For example, `Point_shift` uses the object's address to modify its fields.
-
-LLVM IR is generated with `llvmlite.ir`.
-
-### Task 3 — Built-in Input and Output
-
-The compiler supports two built-in operations:
-
-- `read()` reads an `i32` value from standard input.
-- `print()` prints a value followed by a newline.
-
-The `print()` statement supports integers, booleans, string literals, and structure objects.
-
-Example:
-
-```text
-i32 a{read()}
-print("Input value:")
-print(a)
-exit a
-```
-
-With input `5`, the expected output is:
-
-```text
-Input value:
-5
-Program exit with result 5
-```
-
-Input and output are implemented through LLVM calls to `scanf` and `printf`.
-
-### Additional Task — Chained Calls
-
-The compiler supports member calls and field access after functions that return structures.
-
-Examples:
-
-```text
-p.moved(1).shift(2)
-c.grown(3).radius
-origin().moved(7).x
-```
-
-Function results are treated as temporary values. Their fields can be read and their member functions can be called, but their fields cannot be assignment targets.
-
-## Project Structure
-
-```text
-languages-compilers-practice/
-├── src/
-│   └── compiler.py
-├── tests/
-│   ├── ok/
-│   └── err/
-├── run_tests_practice7.py
-├── run_tests_practice6.py
-├── README.md
-└── ai_usage.txt
-```
-
-The `tests/ok` directory contains valid programs and their expected outputs. The `tests/err` directory contains programs that must be rejected with compilation errors.
-
-Programs requiring standard input use corresponding `.in` files.
-
-## Requirements
-
-- Python 3
-- `llvmlite`
-- LLVM tools (`lli`)
-- Python virtual environment (recommended)
+The effects are propagated through function calls until no new effects are discovered.
+Calls without effects can be removed when their results are unused.
+The bonus tests cover pure functions, mutating methods, recursion, loops, lambdas, and effects propagated through function calls.
 
 ## Running the Compiler
 
@@ -155,56 +89,82 @@ Activate the virtual environment:
 source .venv/bin/activate
 ```
 
-Generate LLVM IR from a source program:
+Compile a program normally:
 
 ```bash
-python3 src/compiler.py input.txt output.ll
+python3 compiler.py input.txt output.ll
 ```
 
-Execute the generated program:
+Compile with optimization:
 
 ```bash
-lli output.ll
+python3 compiler.py --remove-unused input.txt output.ll
 ```
 
-Display the Abstract Syntax Tree:
+Display the optimized checked AST:
 
 ```bash
-python3 src/compiler.py --ast input.txt
+python3 compiler.py --remove-unused --ast-checked input.txt
 ```
 
-## Running Tests
-
-Run the Practice 7 test suite:
+Execute the generated LLVM IR:
 
 ```bash
-python3 run_tests_practice7.py
+lli-18 output.ll
 ```
 
-Run the previous Practice 6 tests to check backward compatibility:
+## Testing
+
+Run all Practice 9 tests and regression checks:
 
 ```bash
-python3 run_tests_practice6.py
+python3 run_tests_practice9.py --all
 ```
 
-At the time of local testing, the Practice 7 test suite passed 61 out of 61 tests, and the Practice 6 suite passed 15 out of 15 tests.
+Run the memory experiment:
 
-## Error Handling
+```bash
+python3 measure_practice9_gc.py
+```
 
-The compiler reports errors with source line and column information.
+### Verified Results
 
-Examples of detected errors include:
+Tests executed on Ubuntu:
 
-- Duplicate fields or member functions.
-- Invalid member function declarations.
-- Unknown fields or member functions.
-- Incorrect numbers or types of arguments.
-- Mutation through immutable objects or fields.
-- Assignment to constant fields.
-- Incorrect return types.
-- Invalid usage of `read()` or `print()`.
-- Invalid chained calls and assignments to temporary values.
+- Practice 9 and regression checks: **206/206 passed**
+- Practice 8: 29/29 passed
+- Practice 6: 15/15 passed
+- Practice 7 regression runner: 90/90 passed
+
+The Practice 9 tests check optimized AST output and verify that program behavior is preserved with and without `--remove-unused`.
+The memory experiment confirmed that the removed AST node was released after its remaining strong references were dropped.
+
+## Previous Functionality — Practice 8
+
+Practice 9 builds on the implementation from Practice 8.
+
+### Callable Objects
+
+- Structures with a `call` member function can be called directly using `obj(args)`.
+- Callable fields are supported.
+- Argument types and mutation rules are checked.
+- Invalid calls produce compilation errors.
+
+### Lambdas
+
+- Lambdas use the syntax `fn name := [captures](params) -> type`.
+- Variables can be captured by value.
+- Lambdas can be declared inside functions, loops, and other blocks.
+- Lambdas are transformed into structures with captured fields and a `call` method.
+- Invalid captures and lambda usage produce compilation errors.
+
+### Mutable Captures
+
+- `[mut variable]` creates a mutable copy of a captured variable.
+- Modifications to captured copies do not affect the original variables.
+- Nested mutable lambdas and mutation checks are supported.
 
 ## AI Usage
 
-Information about AI assistance, including tools, prompts, generated code, modifications, and testing, is documented in `ai_usage.txt`.
+ChatGPT was used to assist with implementation, debugging, writing tests, and documentation for Practice 9.
+The prompts, implementation decisions, modifications, and verification details are documented in `ai_usage.txt`.
