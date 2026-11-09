@@ -1,0 +1,10 @@
+fn mul := (i32 factor, i32 v) -> i32
+{
+ fn apply := [factor](i32 x) -> i32
+ {
+  exit factor * x
+ }
+ exit apply(v)
+}
+print(mul(5,9))
+exit 0

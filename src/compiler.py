@@ -140,11 +140,17 @@ class FunctionNode(Node):
                 param.dump(indent + 2)
             )
 
-        lines.extend(
-            self.body.dump(indent + 2)
-        )
-
+        if self.body is not None:
+            lines.extend(self.body.dump(indent + 2))
         return lines
+
+
+class ExternFnNode(FunctionNode):
+    def dump(self, indent=0):
+        result = [" " * indent + f"ExternFn {self.name} -> {self.result_type}"]
+        for param in self.params:
+            result.extend(param.dump(indent + 2))
+        return result
 
 
 class MemberFnNode(FunctionNode):
@@ -154,6 +160,25 @@ class MemberFnNode(FunctionNode):
             lines.extend(param.dump(indent + 2))
         lines.extend(self.body.dump(indent + 2))
         return lines
+
+class LambdaNode(Node):
+    def __init__(self, function, captures):
+        super().__init__(function.line, function.column)
+        self.name = function.name
+        self.function = function
+        self.captures = captures
+
+    def dump(self, indent=0):
+        lines = [' ' * indent + f"Lambda {self.name} -> {self.function.result_type}"]
+        for tok, mutable in self.captures:
+            lines.append(' ' * (indent + 2) + f"Capture {tok.text} {'mut' if mutable else 'const'}")
+        if hasattr(self, 'generated_struct'):
+            lines.extend(self.generated_struct.dump(indent + 2))
+            lines.extend(self.generated_decl.dump(indent + 2))
+        else:
+            lines.extend(self.function.body.dump(indent + 2))
+        return lines
+
 
 class StmtNode(Node):
     pass
@@ -283,7 +308,7 @@ class CallNode(ExprNode):
 
     def dump(self, indent=0):
         lines = [
-            " " * indent + f"Call {self.name}"
+            " " * indent + (f"CallableCall {self.name}" if hasattr(self, "callable_member") else f"Call {self.name}")
         ]
 
         for arg in self.args:
@@ -566,10 +591,21 @@ class Parser:
                 )
                 continue
 
+            if first.text == "extern":
+                if phase == "statements":
+                    raise CompileError(f"line {first.line}:{first.column}: 'extern' is not allowed here")
+                phase = "functions"
+                functions.append(self.parse_extern())
+                continue
+
             if (
                 first.kind == "keyword"
                 and first.text == "fn"
             ):
+                if any(t.kind == "lbracket" for t in self.toks):
+                    phase = "statements"
+                    statements.append(self.parse_lambda())
+                    continue
                 if phase == "statements":
                     raise CompileError(
                         f"line {first.line}:{first.column}: "
@@ -774,7 +810,16 @@ class Parser:
                 )
             )
 
-    def parse_function(self):
+    def parse_extern(self):
+        extern_tok = self.expect_text("extern", "expected 'extern'")
+        function = self.parse_function(external=True)
+        if function.name in {"printf", "scanf", "main"}:
+            raise CompileError(f"line {function.line}:{function.column}: '{function.name}' is a name the compiler already uses in the module")
+        function.line = extern_tok.line
+        function.column = extern_tok.column
+        return ExternFnNode(function.line, function.column, function.name, function.params, function.result_type, None)
+
+    def parse_function(self, external=False):
         fn_tok = self.expect_text(
             "fn",
             "expected 'fn'"
@@ -850,6 +895,13 @@ class Parser:
                 "after function declaration"
             )
 
+        if external:
+            next_tokens = self.peek_line()
+            if next_tokens and next_tokens[0].kind == "lbrace":
+                tok = next_tokens[0]
+                raise CompileError(f"line {tok.line}:{tok.column}: extern function '{name.text}' has no body: it is defined in C")
+            return FunctionNode(fn_tok.line, fn_tok.column, name.text, params, result_type.text, None)
+
         if not self.next_line():
             raise CompileError(
                 f"line {fn_tok.line}:{fn_tok.column}: "
@@ -886,6 +938,35 @@ class Parser:
             body,
         )
 
+    def parse_lambda(self):
+        original = list(self.toks)
+        start = self.pos
+        fn_tok = self.expect_text("fn", "expected fn")
+        self.expect_kind("identifier", "expected lambda name")
+        self.expect_text(":=", "expected ':='")
+        self.expect_kind("lbracket", "expected '[' for captures")
+        captures = []
+        seen = set()
+        while self.peek() is not None and self.peek().kind != "rbracket":
+            mutable = False
+            if self.peek().text == "mut":
+                self.eat()
+                mutable = True
+            tok = self.expect_kind("identifier", "expected capture name")
+            if tok.text in seen:
+                raise CompileError(f"line {tok.line}:{tok.column}: '{tok.text}' is captured twice")
+            seen.add(tok.text)
+            captures.append((tok, mutable))
+            if self.peek() is None or self.peek().kind != "comma":
+                break
+            self.eat()
+        self.expect_kind("rbracket", "expected ']' after captures")
+        remainder = self.toks[self.pos:]
+        self.toks = original[:start+3] + remainder
+        self.pos = start
+        function = self.parse_function()
+        return LambdaNode(function, captures)
+
     def parse_statement(self):
         tok = self.peek()
 
@@ -893,12 +974,19 @@ class Parser:
             self.error_end(
                 "expected a statement"
             )
+        if tok.text == "extern":
+            raise CompileError(f"line {tok.line}:{tok.column}: 'extern' is not allowed here")
 
         if (
             tok.kind == "keyword"
             and tok.text in {"i32", "i64", "bool"}
         ):
             return self.parse_decl()
+
+        if tok.kind == "keyword" and tok.text == "fn":
+            if any(t.kind == "lbracket" for t in self.toks):
+                return self.parse_lambda()
+            raise CompileError(f"line {tok.line}:{tok.column}: function inside block needs capture list")
 
         if tok.kind == "keyword" and tok.text == "print":
             self.eat()
@@ -929,7 +1017,6 @@ class Parser:
                 ):
                     return self.parse_decl()
 
-            # A call expression alone is not a statement.
             return self.parse_assign()
 
         if (
@@ -1538,6 +1625,9 @@ class SemanticChecker:
         self.current_struct = None
         self.active_member = None
         self.member_calls = []
+        self.program = None
+        self.lambda_names = set()
+        self.forbidden_outer = set()
 
     def lookup(self, node, name):
         for frame in reversed(self.scopes):
@@ -1548,12 +1638,15 @@ class SemanticChecker:
             for field in self.current_struct.fields:
                 if field.name == name:
                     return field
+        if name in self.forbidden_outer:
+            raise CompileError(f"line {node.line}:{node.column}: '{name}' is not captured by lambda: add it to the capture list")
         raise CompileError(
             f"line {node.line}:{node.column}: "
             f"variable '{name}' is used before its declaration"
         )
 
     def check(self, program):
+        self.program = program
         for struct in program.structs:
             self.visit_struct(struct)
 
@@ -1575,9 +1668,8 @@ class SemanticChecker:
                 self.visit_function(method)
                 self.current_struct = None
         for function in program.functions:
-            self.visit_function(
-                function
-            )
+            if not isinstance(function, ExternFnNode):
+                self.visit_function(function)
 
         self.scopes = [{}]
 
@@ -1587,7 +1679,6 @@ class SemanticChecker:
         self.current_function_result = None
 
         self.visit_exit(program.exit_node)
-        # Propagate mutation through mutually recursive member calls.
         changed = True
         while changed:
             changed = False
@@ -1651,6 +1742,15 @@ class SemanticChecker:
         self.structs[node.name] = node
 
     def collect_function(self, node):
+        if isinstance(node, ExternFnNode):
+            for param in node.params:
+                if param.type_name not in {"i32", "i64"}:
+                    raise CompileError(f"line {param.line}:{param.column}: parameter '{param.name}' of extern function '{node.name}' has type '{param.type_name}': only i32 and i64 cross into C")
+            if node.result_type not in {"i32", "i64"}:
+                raise CompileError(f"line {node.line}:{node.column}: extern function '{node.name}' returns '{node.result_type}': only i32 and i64 cross into C")
+            reserved = {"main", "printf", "scanf"} | {f"{struct.name}_{method.name}" for struct in self.program.structs for method in struct.methods}
+            if node.name in reserved:
+                raise CompileError(f"line {node.line}:{node.column}: '{node.name}' is a name the compiler already uses in the module")
         if node.name in {"read", "print"} or node.name in self.functions:
             raise CompileError(
                 f"line {node.line}:{node.column}: "
@@ -1704,6 +1804,7 @@ class SemanticChecker:
         if isinstance(node, MemberFnNode):
             node.mutating = False
             node.same_object_calls = []
+        old_active = self.active_member
         self.active_member = node if isinstance(node, MemberFnNode) else None
         try:
             frame = self.scopes[-1]
@@ -1720,9 +1821,11 @@ class SemanticChecker:
         finally:
             self.scopes = old_scopes
             self.current_function_result = old_result
-            self.active_member = None
+            self.active_member = old_active
 
     def visit_stmt(self, node):
+        if isinstance(node, LambdaNode):
+            return self.visit_lambda(node)
         if isinstance(node, DeclNode):
             return self.visit_decl(node)
 
@@ -1735,6 +1838,10 @@ class SemanticChecker:
         if isinstance(node, WhileNode):
             return self.visit_while(node)
         if isinstance(node, PrintNode):
+            if isinstance(node.value, VarNode):
+                decl = next((scope[node.value.name] for scope in reversed(self.scopes) if node.value.name in scope), None)
+                if decl is not None and decl.type_name.startswith('lambda.'):
+                    raise CompileError(f"line {node.value.line}:{node.value.column}: lambda '{node.value.name}' cannot be printed")
             if isinstance(node.value, StringNode):
                 node.value.type = "string"
             else:
@@ -1744,6 +1851,49 @@ class SemanticChecker:
         raise CompileError(
             f"line {node.line}:{node.column}: unknown statement"
         )
+
+    def visit_lambda(self, node):
+        frame = self.scopes[-1]
+        if node.name in frame or node.name in {'read', 'print'}:
+            raise CompileError(f"line {node.line}:{node.column}: variable '{node.name}' is already declared")
+        fields = []
+        values = []
+        for tok, mutable in node.captures:
+            try:
+                decl = self.lookup(tok, tok.text)
+            except CompileError:
+                raise CompileError(f"line {tok.line}:{tok.column}: cannot capture '{tok.text}': no variable '{tok.text}' is visible here")
+            field = FieldDeclNode(tok.line, tok.column, tok.text, decl.type_name, mutable)
+            fields.append(field)
+            values.append(VarNode(tok.line, tok.column, tok.text))
+            self.visit_var(values[-1])
+        name = f"lambda.{node.name}.{node.line}.{node.column}" if node.name in self.lambda_names else f"lambda.{node.name}"
+        self.lambda_names.add(node.name)
+        method = MemberFnNode(node.line, node.column, 'call', node.function.params,
+                              node.function.result_type, node.function.body)
+        struct = StructNode(node.line, node.column, name, fields, [method])
+        struct.method_map = {'call': method}
+        self.structs[name] = struct
+        self.program.structs.append(struct)
+        self.validate_signature(method)
+        overlap = {f.name for f in fields} & {param.name for param in method.params}
+        if overlap:
+            conflict = next(param for param in method.params if param.name in overlap)
+            raise CompileError(f"line {conflict.line}:{conflict.column}: parameter '{conflict.name}' conflicts with lambda capture")
+        decl = DeclNode(node.line, node.column, node.name, name,
+                        any(m for _, m in node.captures), InitListNode(node.line, node.column, values))
+        decl.struct_def = struct
+        node.generated_struct = struct
+        node.generated_decl = decl
+        old_struct, old_active, old_forbidden = self.current_struct, self.active_member, self.forbidden_outer
+        self.forbidden_outer = {k for scope in self.scopes for k in scope} - {f.name for f in fields}
+        self.current_struct = struct
+        try:
+            self.visit_function(method)
+        finally:
+            self.current_struct, self.active_member, self.forbidden_outer = old_struct, old_active, old_forbidden
+        frame[node.name] = decl
+        return None
 
     def visit_expr(self, node):
         if isinstance(node, ConstNode):
@@ -1819,6 +1969,8 @@ class SemanticChecker:
         node.is_lvalue = True
 
         current_type = decl.type_name
+        if current_type.startswith('lambda.'):
+            raise CompileError(f"line {node.line}:{node.column}: lambda captures are private")
         node.field_indices = []
         node.field_defs = []
 
@@ -1867,6 +2019,28 @@ class SemanticChecker:
         return node.type
 
     def visit_call(self, node):
+        visible = None
+        for scope in reversed(self.scopes):
+            if node.name in scope:
+                visible = scope[node.name]
+                break
+        if visible is None and self.current_struct is not None:
+            visible = next((f for f in self.current_struct.fields if f.name == node.name), None)
+        available_function = node.name in self.functions or (self.current_struct is not None and node.name in self.current_struct.method_map)
+        if visible is not None and available_function:
+            raise CompileError(f"line {node.line}:{node.column}: '{node.name}' is both a variable and a function: rename one of them")
+        if visible is not None:
+            typ = visible.type_name
+            if typ not in self.structs:
+                raise CompileError(f"line {node.line}:{node.column}: '{node.name}' is not callable: it is {typ}")
+            if 'call' not in self.structs[typ].method_map:
+                raise CompileError(f"line {node.line}:{node.column}: '{node.name}' is not callable: {typ} has no member function 'call'")
+            receiver = VarNode(node.line, node.column, node.name)
+            call = MemberCallNode(node.line, node.column, receiver, 'call', node.args)
+            self.visit_member_call(call)
+            node.callable_member = call
+            node.type = call.type
+            return node.type
         if node.name == "read":
             if node.args:
                 raise CompileError(f"line {node.line}:{node.column}: read takes no arguments")
@@ -1932,6 +2106,14 @@ class SemanticChecker:
             raise CompileError(f"line {node.line}:{node.column}: type '{receiver_type}' has no methods")
         struct = self.structs[receiver_type]
         if node.name not in struct.method_map:
+            field = next((f for f in struct.fields if f.name == node.name), None)
+            if field is not None:
+                receiver = ChainFieldNode(node.line, node.column, node.receiver, node.name)
+                rewritten = MemberCallNode(node.line, node.column, receiver, 'call', node.args)
+                self.visit_member_call(rewritten)
+                node.callable_member = rewritten
+                node.type = rewritten.type
+                return node.type
             raise CompileError(f"line {node.line}:{node.column}: unknown member function '{node.name}'")
         method = struct.method_map[node.name]
         node.method = method
@@ -1949,6 +2131,8 @@ class SemanticChecker:
 
     def visit_chain_field(self, node):
         current_type = self.visit_expr(node.receiver)
+        if current_type.startswith('lambda.'):
+            raise CompileError(f"line {node.line}:{node.column}: lambda captures are private")
         if current_type not in self.structs:
             raise CompileError(f"line {node.line}:{node.column}: cannot access field on '{current_type}'")
         for i, field in enumerate(self.structs[current_type].fields):
@@ -2319,6 +2503,8 @@ class SemanticChecker:
                     f"constant {expr.value} does not fit in i32"
                 )
 
+        if have.startswith('lambda.') and have != want:
+            raise CompileError(f"line {at.line}:{at.column}: lambda cannot be used as a value here: its type has no name")
         if have == want:
             return
 
@@ -2332,9 +2518,9 @@ class SemanticChecker:
         )
 
     def visit_exit(self, node):
-        self.visit_expr(
-            node.value
-        )
+        self.visit_expr(node.value)
+        if node.value.type.startswith('lambda.'):
+            raise CompileError(f"line {node.line}:{node.column}: lambda cannot be returned: its type has no name")
 
         if self.current_function_result is not None:
             self.check_assignable(
@@ -2487,6 +2673,7 @@ class CodeGen:
                 self.module,
                 function_type,
                 name=(f"{function.owner.name}_{function.name}" if isinstance(function, MemberFnNode)
+                      else function.name if isinstance(function, ExternFnNode)
                       else f"user_{function.name}"),
             )
 
@@ -2562,9 +2749,8 @@ class CodeGen:
         )
 
         for function in program.functions + [m for st in program.structs for m in st.methods]:
-            self.generate_function(
-                function
-            )
+            if not isinstance(function, ExternFnNode):
+                self.generate_function(function)
 
         for stmt in program.statements:
             self.visit_stmt(
@@ -2578,6 +2764,8 @@ class CodeGen:
         )
 
     def visit_stmt(self, node):
+        if isinstance(node, LambdaNode):
+            return self.visit_decl(node.generated_decl)
         if isinstance(node, DeclNode):
             return self.visit_decl(node)
 
@@ -2704,6 +2892,8 @@ class CodeGen:
         )
 
     def visit_call(self, node):
+        if hasattr(node, 'callable_member'):
+            return self.visit_member_call(node.callable_member)
         if node.name == "read":
             ptr = self.create_entry_alloca("i32", "read_slot")
             fmt = self.get_format("%d")
@@ -2783,6 +2973,8 @@ class CodeGen:
         return self.builder.load(self.chain_pointer(node), name="chain_field")
 
     def visit_member_call(self, node):
+        if hasattr(node, 'callable_member'):
+            return self.visit_member_call(node.callable_member)
         return self.invoke_method(node.method, self.receiver_pointer(node.receiver), node.args)
 
     def visit_print(self, node):
@@ -2806,8 +2998,11 @@ class CodeGen:
         else:
             struct = self.struct_definitions[typ]
             self.builder.call(self.printf, [self.get_format(prefix + typ + "{")])
+            aggregate_ptr = self.create_entry_alloca(typ, "print_struct_slot")
+            self.builder.store(value, aggregate_ptr)
             for i, field in enumerate(struct.fields):
-                field_value = self.builder.extract_value(value, i)
+                field_ptr = self.builder.gep(aggregate_ptr, [ir.Constant(I32, 0), ir.Constant(I32, i)], name="print_field_ptr")
+                field_value = self.builder.load(field_ptr, name="print_field")
                 self.print_value(field_value, field.type_name, ("" if i == 0 else ", ") + field.name + ": ", "")
             self.builder.call(self.printf, [self.get_format("}" + suffix)])
 
@@ -3243,6 +3438,7 @@ KEYWORDS = {
     "while": "keyword",
     "struct": "keyword",
     "fn": "keyword",
+    "extern": "keyword",
     "read": "keyword",
     "print": "keyword",
 }
@@ -3341,6 +3537,16 @@ def lex(data: bytes):
                     Token("rbrace", "}", line, col)
                 )
 
+                i += 1
+                col += 1
+                continue
+            if b == ord("["):
+                tokens.append(Token("lbracket", "[", line, col))
+                i += 1
+                col += 1
+                continue
+            if b == ord("]"):
+                tokens.append(Token("rbracket", "]", line, col))
                 i += 1
                 col += 1
                 continue
@@ -3895,7 +4101,217 @@ def parse_exit(
     )
 
 
-def compile_program(source_path, output_path):
+"""Practice 9 AST optimization. Runs only after the semantic checker."""
+from collections import defaultdict
+
+# Imported from the existing compiler, not a separate compilation pipeline.
+
+def children(n):
+    if isinstance(n, ProgramNode):
+        return [*n.structs, *n.functions, *n.statements, n.exit_node]
+    if isinstance(n, StructNode):
+        return list(n.methods)
+    if isinstance(n, FunctionNode):
+        return [n.body] if n.body is not None else []
+    if isinstance(n, LambdaNode):
+        # Semantic checking lowered the lambda to a generated local declaration.
+        return [n.generated_decl] if hasattr(n, 'generated_decl') else [n.function.body]
+    if isinstance(n, BlockNode):
+        return [*n.statements, n.exit_node]
+    if isinstance(n, DeclNode):
+        return [n.init]
+    if isinstance(n, AssignNode):
+        return [n.value]  # The assignment destination is not a read.
+    if isinstance(n, (ExitNode, PrintNode)):
+        return [n.value]
+    if isinstance(n, NotNode):
+        return [n.operand]
+    if isinstance(n, (InitListNode, StructInitNode)):
+        return list(n.values)
+    if isinstance(n, BinOpNode):
+        return [n.left, n.right]
+    if isinstance(n, IfNode):
+        return [n.condition, n.then_block, n.else_block]
+    if isinstance(n, WhileNode):
+        return [n.condition, n.body]
+    if isinstance(n, CallNode):
+        return list(n.args) + ([n.callable_member.receiver] if hasattr(n, 'callable_member') else [])
+    if isinstance(n, MemberCallNode):
+        return [n.receiver, *n.args]
+    if isinstance(n, ChainFieldNode):
+        return [n.receiver]
+    return []
+
+
+def walk(node):
+    if node is None:
+        return
+    yield node
+    for child in children(node):
+        yield from walk(child)
+
+
+def destination(stmt):
+    target = stmt.target
+    if isinstance(target, (VarNode, FieldAccessNode)):
+        return getattr(target, 'decl', None)
+    if isinstance(target, ChainFieldNode):
+        receiver = target.receiver
+        while isinstance(receiver, ChainFieldNode):
+            receiver = receiver.receiver
+        return getattr(receiver, 'decl', None)
+    return None
+
+
+def called_functions(node):
+    for n in walk(node):
+        if isinstance(n, CallNode):
+            if hasattr(n, 'function'):
+                yield n.function
+            if hasattr(n, 'member_function'):
+                yield n.member_function
+            if hasattr(n, 'callable_member'):
+                call = n.callable_member
+                yield getattr(call, 'method', None)
+        elif isinstance(n, MemberCallNode):
+            yield getattr(n, 'method', None)
+
+
+class EffectAnalyzer:
+    """Conservative transitive effects, including recursion and nontermination."""
+    def __init__(self, tree):
+        functions = [n for n in walk(tree) if isinstance(n, FunctionNode)]
+        self.functions = list({id(n): n for n in functions}.values())
+        self.edges = {f: set(x for x in called_functions(f.body) if x is not None) if f.body is not None else set() for f in self.functions}
+        # Method effects include mutations. Direct print/read and while are observable.
+        self.effects = set()
+        for f in self.functions:
+            if isinstance(f, ExternFnNode) or getattr(f, 'mutating', False) or any(isinstance(n, (PrintNode, WhileNode)) or
+                    (isinstance(n, CallNode) and n.name == 'read' and not hasattr(n, 'callable_member'))
+                    for n in walk(f.body)):
+                self.effects.add(f)
+        # A recursive call (direct or indirect) can fail to return.
+        def recursive(origin, current, seen):
+            for dest in self.edges.get(current, ()):
+                if dest is origin:
+                    return True
+                if dest not in seen and recursive(origin, dest, seen | {dest}):
+                    return True
+            return False
+        for f in self.functions:
+            if recursive(f, f, {f}):
+                self.effects.add(f)
+        changed = True
+        while changed:
+            old = len(self.effects)
+            self.effects.update(f for f in self.functions if self.edges[f] & self.effects)
+            changed = len(self.effects) != old
+
+    def has_effect(self, node):
+        for n in walk(node):
+            if isinstance(n, CallNode):
+                if n.name == 'read' and not hasattr(n, 'callable_member'):
+                    return True
+                if hasattr(n, 'function') and n.function in self.effects:
+                    return True
+                if hasattr(n, 'member_function') and n.member_function in self.effects:
+                    return True
+                if hasattr(n, 'callable_member'):
+                    method = getattr(n.callable_member, 'method', None)
+                    if method is None or method in self.effects:
+                        return True
+            elif isinstance(n, MemberCallNode):
+                method = getattr(n, 'method', None)
+                if method is None or method in self.effects:
+                    return True
+        return False
+
+
+class UseCounter:
+    def __init__(self, effects):
+        self.reads = defaultdict(int)
+        self.decls = {}
+        self.effects = effects
+        self.calls = defaultdict(int)
+
+    def read(self, decl):
+        if isinstance(decl, DeclNode):
+            self.reads[id(decl)] += 1
+
+    def visit(self, node):
+        if node is None:
+            return
+        if isinstance(node, DeclNode):
+            self.decls[id(node)] = node
+            self.reads[id(node)] += 0
+            if self.effects.has_effect(node.init):
+                self.read(node)
+        elif isinstance(node, AssignNode):
+            # A side-effecting RHS must not be erased even when its target is dead.
+            if self.effects.has_effect(node.value):
+                self.read(destination(node))
+        elif isinstance(node, (VarNode, FieldAccessNode)):
+            self.read(getattr(node, 'decl', None))
+        elif isinstance(node, CallNode):
+            if hasattr(node, 'function'):
+                self.calls[id(node.function)] += 1
+        elif isinstance(node, MemberCallNode):
+            pass
+        if isinstance(node, AssignNode):
+            self.visit(node.value)
+        else:
+            for child in children(node):
+                self.visit(child)
+
+
+class Pruner:
+    def __init__(self, dead_decls, dead_functions):
+        self.dead_decls = dead_decls
+        self.dead_functions = dead_functions
+        self.changed = False
+
+    def prune(self, tree):
+        new_functions = [f for f in tree.functions if id(f) not in self.dead_functions]
+        if len(new_functions) != len(tree.functions):
+            self.changed = True
+        tree.functions = new_functions
+        self.visit(tree)
+        return self.changed
+
+    def visit(self, node):
+        if node is None:
+            return
+        if isinstance(node, (ProgramNode, BlockNode)):
+            kept = []
+            for stmt in node.statements:
+                decl = stmt.generated_decl if isinstance(stmt, LambdaNode) and hasattr(stmt, 'generated_decl') else stmt
+                if isinstance(decl, DeclNode) and id(decl) in self.dead_decls:
+                    self.changed = True
+                    continue
+                if isinstance(stmt, AssignNode) and id(destination(stmt)) in self.dead_decls:
+                    self.changed = True
+                    continue
+                kept.append(stmt)
+            node.statements = kept
+        for child in children(node):
+            self.visit(child)
+
+
+def remove_unused(tree):
+    """Iterate AST use-counting and pruning to a fixpoint."""
+    while True:
+        effects = EffectAnalyzer(tree)
+        counter = UseCounter(effects)
+        counter.visit(tree)
+        dead_decls = {key for key in counter.decls if counter.reads[key] == 0}
+        dead_functions = {id(f) for f in tree.functions if counter.calls[id(f)] == 0}
+        if not dead_decls and not dead_functions:
+            return tree
+        if not Pruner(dead_decls, dead_functions).prune(tree):
+            return tree
+
+
+def compile_program(source_path, output_path, remove_unused_flag=False):
     with open(source_path, "rb") as f:
         data = f.read()
 
@@ -3906,6 +4322,8 @@ def compile_program(source_path, output_path):
 
     checker = SemanticChecker()
     checker.check(tree)
+    if remove_unused_flag:
+        remove_unused(tree)
 
     module = ir.Module(name="practice3")
     module.triple = llvm.get_default_triple()
@@ -3969,86 +4387,33 @@ def compile_program(source_path, output_path):
         f.write(str(module))
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "--ast":
-        source_path = sys.argv[2]
-
-        try:
-            with open(source_path, "rb") as f:
-                data = f.read()
-
-            token_lines = lex(data)
-
-            parser = Parser(token_lines)
-            tree = parser.parse_program()
-
-            for line in tree.dump():
-                print(line)
-
-        except CompileError as e:
-            print(
-                f"compilation error: {e}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        except FileNotFoundError:
-            print(
-                f"compilation error: source file "
-                f"'{source_path}' not found",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        return
-
-    if len(sys.argv) != 3:
-        print(
-            "usage:",
-            file=sys.stderr,
-        )
-        print(
-            "  python3 compiler.py <source> <output.ll>",
-            file=sys.stderr,
-        )
-        print(
-            "  python3 compiler.py --ast <source>",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    source_path = sys.argv[1]
-    output_path = sys.argv[2]
-
-    if os.path.exists(output_path):
-        os.remove(output_path)
-
+    args = sys.argv[1:]
+    optimized = '--remove-unused' in args
+    args = [a for a in args if a != '--remove-unused']
+    ast_mode = next((a for a in args if a in ('--ast', '--ast-checked')), None)
     try:
-        compile_program(
-            source_path,
-            output_path,
-        )
-
-    except CompileError as e:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-        print(
-            f"compilation error: {e}",
-            file=sys.stderr,
-        )
-
-        sys.exit(1)
-
-    except FileNotFoundError:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-        print(
-            f"compilation error: source file "
-            f"'{source_path}' not found",
-            file=sys.stderr,
-        )
-
+        if ast_mode is not None:
+            if len(args) != 2 or args.count(ast_mode) != 1:
+                raise ValueError('usage: compiler.py [--remove-unused] --ast-checked source.txt')
+            source_path = next(a for a in args if a != ast_mode)
+            with open(source_path, 'rb') as f:
+                tree = Parser(lex(f.read())).parse_program()
+            if ast_mode == '--ast-checked':
+                SemanticChecker().check(tree)
+                if optimized:
+                    remove_unused(tree)
+            print('\n'.join(tree.dump()))
+        else:
+            if len(args) != 2:
+                raise ValueError('usage: compiler.py [--remove-unused] source.txt output.ll')
+            source_path, output_path = args
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            compile_program(source_path, output_path, optimized)
+    except (CompileError, FileNotFoundError, ValueError) as exc:
+        if ast_mode is None and len(args) == 2 and os.path.exists(args[1]):
+            os.remove(args[1])
+        print(f'compilation error: {exc}', file=sys.stderr)
         sys.exit(1)
 
 

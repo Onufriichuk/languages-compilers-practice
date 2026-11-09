@@ -1,0 +1,5 @@
+fn bad := []() -> i32
+{
+ exit bad()
+}
+exit 0

@@ -1,1 +1,48 @@
-https://chatgpt.com/share/6ad607f0-a774-83ed-a0f8-81691a40bf20
+Practice 10 - AI Usage Disclosure
+
+Link: https://chatgpt.com/share/6af22310-95a4-83eb-9732-8758f8923680
+
+**Tool:** OpenAI ChatGPT (GPT-6)
+
+**How I used AI:**
+
+I used ChatGPT to help update my Practice 9 compiler for Practice 10. I uploaded my Practice 9 project as a ZIP file and asked ChatGPT to prepare the implementation for Practice 10, including the additional C integration task.
+
+**What AI helped with:**
+
+- Implementing `extern fn` parsing, semantic checks, and LLVM IR declarations.
+- Updating the structure printer to work with different structures.
+- Creating the `points` and `geometry` programs.
+- Adding input/output tests, FFI tests, and error tests.
+- Creating `run_tests_practice10.py` and the build script.
+- Preparing project documentation and explaining the assignment requirements.
+- Providing an outline for the course reflection, without writing the final reflection answers.
+
+**What I used from AI:**
+
+I used the generated Practice 10 implementation and test files as the basis for my project.
+
+**What I did myself:**
+
+I transferred the project to my Ubuntu virtual machine and tested the implementation.
+
+At first, all tests failed because the `llvmlite` library was not available in the active Python environment. I activated the virtual environment from Practice 9 and ran the tests again.
+
+I also manually compiled and tested the `points` and `geometry` programs using `llc-18` and `clang`. I checked the program outputs and external function symbols using `nm`.
+
+I updated the README documentation and wrote my course reflection independently.
+
+**Verification:**
+
+- Complete test suite: 238/238 passed.
+- Tests passed with and without `--remove-unused`.
+- The `points` program compiled and ran successfully.
+- All three `points` input sessions produced the correct results.
+- The `geometry` program compiled and linked with C successfully.
+- Both `geometry` sessions produced the correct results.
+- I verified the external symbols using `nm`.
+- I compared the `points.sheet` output with its expected output using `diff`.
+
+**Reflection:**
+
+I wrote the five answers in `reflection.md` independently, without using AI to generate the final reflection text.

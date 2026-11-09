@@ -1,210 +1,114 @@
-# Languages and Compilers Design — Practice 7
+## Practice 10 — A Real Program and C Integration
 
-## Overview
+### Overview
 
-This project implements a compiler for a small programming language using Python and `llvmlite`.
+In Practice 10, I extended my compiler from Practice 9 to compile and run a real program as an executable binary.
 
-Practice 7 extends the compiler from the previous practices by adding member functions inside structures, field access and mutation rules, built-in input/output operations, and chained function calls.
+The main program works with three points, calculates their squared distances from the origin, and finds points that match a distance entered by the user.
 
-The compiler generates LLVM IR, which can be executed using `lli`.
+I also implemented the additional task, which allows programs written in our language to call external C functions using `extern fn`.
 
-## Features
+### Task 1 — Points Program
 
-The compiler supports:
+The program is located in `tests/io/points.txt`.
 
-- Basic types: `i32`, `i64`, and `bool`.
-- User-defined structures with typed fields.
-- Mutable (`mut`) and immutable variables and fields.
-- Variable declarations and assignments.
-- Arithmetic and comparison operations.
-- Conditional statements (`if`, `else`) and `while` loops.
-- Global functions with parameters and return values.
-- Member functions declared inside structures.
-- Member function calls and nested field access.
-- Type checking and mutation rules.
-- Built-in `read()` and `print()` operations.
-- Chained calls on temporary structure values (additional task).
-- AST output using `--ast`.
-- LLVM IR generation using `llvmlite.ir`.
+It uses:
 
-## Practice 7 Implementation
+- A `Point` structure with `x` and `y` fields
+- A member function `d2()` to calculate the squared distance
+- A function `report()` to check and print matching points
+- `read()` to receive user input
+- `print()` to display the results
 
-### Task 1 — Member Functions
+The compiler supports printing structures by going through their fields. This works for different structures without adding special code for `Point`.
 
-Structures can contain member functions after their field declarations.
+### Building an Executable Binary
 
-Member functions are called on structure objects using dot notation.
+The compiler generates LLVM IR using `llvmlite.ir`. The generated LLVM IR can be converted into an object file and then linked into an executable binary.
 
-Example:
-
-```text
-struct Point
-{
-    i32 mut x
-    i32 mut y
-
-    fn d2 := () -> i32
-    {
-        i32 r{x * x + y * y}
-        exit r
-    }
-}
-
-Point p{3, 4}
-i32 result{p.d2()}
-exit result
-```
-
-Expected output:
-
-```text
-Program exit with result 25
-```
-
-The compiler supports member function calls on nested structure fields, such as `c.center.d2()`.
-
-### Task 2 — Name Resolution, Mutation and Code Generation
-
-Inside a member function, parameters and local variables take priority over structure fields.
-
-Member functions can access fields of their object directly and call other member functions of the same structure.
-
-Mutating member functions can only be called through mutable objects and mutable field chains.
-
-The compiler checks these rules during semantic analysis.
-
-In LLVM IR, a member function receives a pointer to its object as an implicit first argument (`this`).
-
-For example, `Point_shift` uses the object's address to modify its fields.
-
-LLVM IR is generated with `llvmlite.ir`.
-
-### Task 3 — Built-in Input and Output
-
-The compiler supports two built-in operations:
-
-- `read()` reads an `i32` value from standard input.
-- `print()` prints a value followed by a newline.
-
-The `print()` statement supports integers, booleans, string literals, and structure objects.
-
-Example:
-
-```text
-i32 a{read()}
-print("Input value:")
-print(a)
-exit a
-```
-
-With input `5`, the expected output is:
-
-```text
-Input value:
-5
-Program exit with result 5
-```
-
-Input and output are implemented through LLVM calls to `scanf` and `printf`.
-
-### Additional Task — Chained Calls
-
-The compiler supports member calls and field access after functions that return structures.
-
-Examples:
-
-```text
-p.moved(1).shift(2)
-c.grown(3).radius
-origin().moved(7).x
-```
-
-Function results are treated as temporary values. Their fields can be read and their member functions can be called, but their fields cannot be assignment targets.
-
-## Project Structure
-
-```text
-languages-compilers-practice/
-├── src/
-│   └── compiler.py
-├── tests/
-│   ├── ok/
-│   └── err/
-├── run_tests_practice7.py
-├── run_tests_practice6.py
-├── README.md
-└── ai_usage.txt
-```
-
-The `tests/ok` directory contains valid programs and their expected outputs. The `tests/err` directory contains programs that must be rejected with compilation errors.
-
-Programs requiring standard input use corresponding `.in` files.
-
-## Requirements
-
-- Python 3
-- `llvmlite`
-- LLVM tools (`lli`)
-- Python virtual environment (recommended)
-
-## Running the Compiler
-
-Activate the virtual environment:
+Commands:
 
 ```bash
-source .venv/bin/activate
+python3 compiler.py tests/io/points.txt points.ll
+llc-18 -filetype=obj -relocation-model=pic points.ll -o points.o
+clang -fPIE points.o -o points
+./points < tests/io/points.sheet.in
 ```
 
-Generate LLVM IR from a source program:
+The program can also be started manually:
 
 ```bash
-python3 src/compiler.py input.txt output.ll
+./points
 ```
 
-Execute the generated program:
+### Input and Output Tests
+
+I added three test sessions in `tests/io`:
+
+- `points.sheet` checks two matching points.
+- `points.none` checks a case without matching points.
+- `points.all` checks three matching points with negative coordinates.
+
+Each session has an `.in` file with input values and an `.expected` file with the expected output.
+
+### Additional Task — Calling C Functions
+
+I implemented support for external C functions using `extern fn`.
+
+The compiler can now call functions such as `abs` from the C standard library and `isqrt` from `tests/ffi/geometry.c`.
+
+The implementation includes:
+
+- Parsing external function declarations
+- Checking parameter and return types
+- Supporting `i32` and `i64` in external function signatures
+- Generating LLVM function declarations using their original C names
+- Linking the generated object file with C code
+- Checking invalid external function declarations
+- Supporting external functions with `--remove-unused`
+
+The bonus program is located in `tests/ffi/geometry.txt`.
+
+Commands:
 
 ```bash
-lli output.ll
+python3 compiler.py tests/ffi/geometry.txt geometry.ll
+llc-18 -filetype=obj -relocation-model=pic geometry.ll -o geometry.o
+clang -fPIE geometry.o tests/ffi/geometry.c -o geometry
+./geometry < tests/ffi/geometry.sheet.in
 ```
 
-Display the Abstract Syntax Tree:
+The `tests/err` directory also contains tests for invalid `extern fn` declarations.
+
+### Testing
+
+I added `run_tests_practice10.py` to test the new functionality and check that previous features still work.
+
+The script tests programs with and without the `--remove-unused` optimization.
+
+To run all tests:
 
 ```bash
-python3 src/compiler.py --ast input.txt
+python3 run_tests_practice10.py --all
 ```
 
-## Running Tests
-
-Run the Practice 7 test suite:
+To run only the new tests:
 
 ```bash
-python3 run_tests_practice7.py
+python3 run_tests_practice10.py --all --new-only
 ```
 
-Run the previous Practice 6 tests to check backward compatibility:
+### Verified Results
 
-```bash
-python3 run_tests_practice6.py
-```
+I ran the complete Practice 10 test script in my Ubuntu virtual machine after activating the Python virtual environment.
 
-At the time of local testing, the Practice 7 test suite passed 61 out of 61 tests, and the Practice 6 suite passed 15 out of 15 tests.
+**Result: 238/238 tests passed.**
 
-## Error Handling
+The tests include previous compiler functionality, optimization tests, input/output sessions, and external C function tests.
 
-The compiler reports errors with source line and column information.
+### Documentation
 
-Examples of detected errors include:
+- `reflection.md` contains my personal course reflection.
+- `ai_usage.txt` describes how AI tools were used during the practice.
 
-- Duplicate fields or member functions.
-- Invalid member function declarations.
-- Unknown fields or member functions.
-- Incorrect numbers or types of arguments.
-- Mutation through immutable objects or fields.
-- Assignment to constant fields.
-- Incorrect return types.
-- Invalid usage of `read()` or `print()`.
-- Invalid chained calls and assignments to temporary values.
-
-## AI Usage
-
-Information about AI assistance, including tools, prompts, generated code, modifications, and testing, is documented in `ai_usage.txt`.
+The implementation builds on the previous practices and preserves the existing compiler functionality.

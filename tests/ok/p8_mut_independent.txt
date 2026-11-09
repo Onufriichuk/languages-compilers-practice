@@ -1,0 +1,14 @@
+i32 n{4}
+fn first := [mut n]() -> i32
+{
+ n := n + 1
+ exit n
+}
+fn second := [mut n]() -> i32
+{
+ n := n + 2
+ exit n
+}
+print(first())
+print(second())
+exit n

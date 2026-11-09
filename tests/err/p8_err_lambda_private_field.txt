@@ -1,0 +1,7 @@
+i32 k{3}
+fn f := [k]() -> i32
+{
+ exit k
+}
+print(f.k)
+exit 0
