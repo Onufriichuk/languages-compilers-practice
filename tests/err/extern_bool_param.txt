@@ -1,0 +1,2 @@
+extern fn odd := (bool b) -> i32
+exit 0

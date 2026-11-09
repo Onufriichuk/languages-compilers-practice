@@ -140,11 +140,17 @@ class FunctionNode(Node):
                 param.dump(indent + 2)
             )
 
-        lines.extend(
-            self.body.dump(indent + 2)
-        )
-
+        if self.body is not None:
+            lines.extend(self.body.dump(indent + 2))
         return lines
+
+
+class ExternFnNode(FunctionNode):
+    def dump(self, indent=0):
+        result = [" " * indent + f"ExternFn {self.name} -> {self.result_type}"]
+        for param in self.params:
+            result.extend(param.dump(indent + 2))
+        return result
 
 
 class MemberFnNode(FunctionNode):
@@ -585,6 +591,13 @@ class Parser:
                 )
                 continue
 
+            if first.text == "extern":
+                if phase == "statements":
+                    raise CompileError(f"line {first.line}:{first.column}: 'extern' is not allowed here")
+                phase = "functions"
+                functions.append(self.parse_extern())
+                continue
+
             if (
                 first.kind == "keyword"
                 and first.text == "fn"
@@ -797,7 +810,16 @@ class Parser:
                 )
             )
 
-    def parse_function(self):
+    def parse_extern(self):
+        extern_tok = self.expect_text("extern", "expected 'extern'")
+        function = self.parse_function(external=True)
+        if function.name in {"printf", "scanf", "main"}:
+            raise CompileError(f"line {function.line}:{function.column}: '{function.name}' is a name the compiler already uses in the module")
+        function.line = extern_tok.line
+        function.column = extern_tok.column
+        return ExternFnNode(function.line, function.column, function.name, function.params, function.result_type, None)
+
+    def parse_function(self, external=False):
         fn_tok = self.expect_text(
             "fn",
             "expected 'fn'"
@@ -873,6 +895,13 @@ class Parser:
                 "after function declaration"
             )
 
+        if external:
+            next_tokens = self.peek_line()
+            if next_tokens and next_tokens[0].kind == "lbrace":
+                tok = next_tokens[0]
+                raise CompileError(f"line {tok.line}:{tok.column}: extern function '{name.text}' has no body: it is defined in C")
+            return FunctionNode(fn_tok.line, fn_tok.column, name.text, params, result_type.text, None)
+
         if not self.next_line():
             raise CompileError(
                 f"line {fn_tok.line}:{fn_tok.column}: "
@@ -945,6 +974,8 @@ class Parser:
             self.error_end(
                 "expected a statement"
             )
+        if tok.text == "extern":
+            raise CompileError(f"line {tok.line}:{tok.column}: 'extern' is not allowed here")
 
         if (
             tok.kind == "keyword"
@@ -1637,9 +1668,8 @@ class SemanticChecker:
                 self.visit_function(method)
                 self.current_struct = None
         for function in program.functions:
-            self.visit_function(
-                function
-            )
+            if not isinstance(function, ExternFnNode):
+                self.visit_function(function)
 
         self.scopes = [{}]
 
@@ -1712,6 +1742,15 @@ class SemanticChecker:
         self.structs[node.name] = node
 
     def collect_function(self, node):
+        if isinstance(node, ExternFnNode):
+            for param in node.params:
+                if param.type_name not in {"i32", "i64"}:
+                    raise CompileError(f"line {param.line}:{param.column}: parameter '{param.name}' of extern function '{node.name}' has type '{param.type_name}': only i32 and i64 cross into C")
+            if node.result_type not in {"i32", "i64"}:
+                raise CompileError(f"line {node.line}:{node.column}: extern function '{node.name}' returns '{node.result_type}': only i32 and i64 cross into C")
+            reserved = {"main", "printf", "scanf"} | {f"{struct.name}_{method.name}" for struct in self.program.structs for method in struct.methods}
+            if node.name in reserved:
+                raise CompileError(f"line {node.line}:{node.column}: '{node.name}' is a name the compiler already uses in the module")
         if node.name in {"read", "print"} or node.name in self.functions:
             raise CompileError(
                 f"line {node.line}:{node.column}: "
@@ -2634,6 +2673,7 @@ class CodeGen:
                 self.module,
                 function_type,
                 name=(f"{function.owner.name}_{function.name}" if isinstance(function, MemberFnNode)
+                      else function.name if isinstance(function, ExternFnNode)
                       else f"user_{function.name}"),
             )
 
@@ -2709,9 +2749,8 @@ class CodeGen:
         )
 
         for function in program.functions + [m for st in program.structs for m in st.methods]:
-            self.generate_function(
-                function
-            )
+            if not isinstance(function, ExternFnNode):
+                self.generate_function(function)
 
         for stmt in program.statements:
             self.visit_stmt(
@@ -2959,8 +2998,11 @@ class CodeGen:
         else:
             struct = self.struct_definitions[typ]
             self.builder.call(self.printf, [self.get_format(prefix + typ + "{")])
+            aggregate_ptr = self.create_entry_alloca(typ, "print_struct_slot")
+            self.builder.store(value, aggregate_ptr)
             for i, field in enumerate(struct.fields):
-                field_value = self.builder.extract_value(value, i)
+                field_ptr = self.builder.gep(aggregate_ptr, [ir.Constant(I32, 0), ir.Constant(I32, i)], name="print_field_ptr")
+                field_value = self.builder.load(field_ptr, name="print_field")
                 self.print_value(field_value, field.type_name, ("" if i == 0 else ", ") + field.name + ": ", "")
             self.builder.call(self.printf, [self.get_format("}" + suffix)])
 
@@ -3396,6 +3438,7 @@ KEYWORDS = {
     "while": "keyword",
     "struct": "keyword",
     "fn": "keyword",
+    "extern": "keyword",
     "read": "keyword",
     "print": "keyword",
 }
@@ -4069,7 +4112,7 @@ def children(n):
     if isinstance(n, StructNode):
         return list(n.methods)
     if isinstance(n, FunctionNode):
-        return [n.body]
+        return [n.body] if n.body is not None else []
     if isinstance(n, LambdaNode):
         # Semantic checking lowered the lambda to a generated local declaration.
         return [n.generated_decl] if hasattr(n, 'generated_decl') else [n.function.body]
@@ -4139,11 +4182,11 @@ class EffectAnalyzer:
     def __init__(self, tree):
         functions = [n for n in walk(tree) if isinstance(n, FunctionNode)]
         self.functions = list({id(n): n for n in functions}.values())
-        self.edges = {f: set(x for x in called_functions(f.body) if x is not None) for f in self.functions}
+        self.edges = {f: set(x for x in called_functions(f.body) if x is not None) if f.body is not None else set() for f in self.functions}
         # Method effects include mutations. Direct print/read and while are observable.
         self.effects = set()
         for f in self.functions:
-            if getattr(f, 'mutating', False) or any(isinstance(n, (PrintNode, WhileNode)) or
+            if isinstance(f, ExternFnNode) or getattr(f, 'mutating', False) or any(isinstance(n, (PrintNode, WhileNode)) or
                     (isinstance(n, CallNode) and n.name == 'read' and not hasattr(n, 'callable_member'))
                     for n in walk(f.body)):
                 self.effects.add(f)

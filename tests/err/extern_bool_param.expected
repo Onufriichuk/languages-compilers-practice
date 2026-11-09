@@ -1,0 +1,1 @@
+compilation error: line 1:24: parameter 'b' of extern function 'odd' has type 'bool': only i32 and i64 cross into C

@@ -1,170 +1,114 @@
-# Languages and Compilers — Practice 9
+## Practice 10 — A Real Program and C Integration
 
-## Overview
+### Overview
 
-Practice 9 extends the compiler from Practice 8 with an AST optimization pass that removes unused variables and global functions.
-The optimization runs after semantic checking and before LLVM code generation. The compiler is written in Python and uses `llvmlite.ir` to generate LLVM IR.
-The additional task implements effect analysis to identify function calls that can be safely removed when their results are unused.
-All functionality from previous practices is preserved.
+In Practice 10, I extended my compiler from Practice 9 to compile and run a real program as an executable binary.
 
-## Practice 9 — Optimizations
+The main program works with three points, calculates their squared distances from the origin, and finds points that match a distance entered by the user.
 
-The compiler supports the `--remove-unused` flag. This flag enables optimization of the checked AST before code generation.
-Without this flag, the compiler works as before. The flag can be placed anywhere in the command-line arguments.
+I also implemented the additional task, which allows programs written in our language to call external C functions using `extern fn`.
 
-### Task 1 — Unused Variables
+### Task 1 — Points Program
 
-`UseCounter` walks through the AST and counts how many times each variable is read.
-Variables are tracked by their declaration identity using `id(decl)`, not just by their names. This allows the compiler to correctly handle variables with the same name in different scopes.
-Assignment targets are not counted as reads.
-`Pruner` removes unused variable declarations and assignments to those variables from the AST.
-The optimization repeats until no more declarations can be removed.
-Variables are preserved when their initializers or assignments contain observable side effects. Function parameters and structure fields are not removed.
+The program is located in `tests/io/points.txt`.
 
-### Task 2 — Unused Functions
+It uses:
 
-The optimization also identifies global functions that are never called.
-Unused global function definitions are removed together with their bodies.
-The process repeats because removing one function may make another function unused.
-Member functions and generated lambda methods are preserved.
+- A `Point` structure with `x` and `y` fields
+- A member function `d2()` to calculate the squared distance
+- A function `report()` to check and print matching points
+- `read()` to receive user input
+- `print()` to display the results
 
-### Task 3 — Tests and Memory Management
+The compiler supports printing structures by going through their fields. This works for different structures without adding special code for `Point`.
 
-The `tests/opt` directory contains optimization tests covering:
+### Building an Executable Binary
 
-- Unused variable chains
-- Variable shadowing
-- Unused global functions
-- Variables inside `if` blocks
-- Function calls with observable effects
-- Programs where nothing should be removed
-- Assignments to unused variables
-- Additional bonus cases
+The compiler generates LLVM IR using `llvmlite.ir`. The generated LLVM IR can be converted into an object file and then linked into an executable binary.
 
-Each test contains three files:
-
-- `.txt` — source program
-- `.astc` — expected optimized checked AST
-- `.expected` — expected program output or exit result
-
-The test runner checks the new optimization tests and previous programs in `tests/ok` and `tests/err` with and without the optimization flag.
-
-### Memory Management
-
-The compiler is implemented in Python, which uses reference counting and cyclic garbage collection.
-AST nodes in this compiler do not store pointers to their parent nodes.
-When the optimization removes a node from the AST and no other strong references remain, Python can release that object.
-If parent pointers existed, they could create reference cycles that would require the cyclic garbage collector.
-The `measure_practice9_gc.py` script uses `weakref.ref()` to check whether a removed AST node is released.
-The experiment showed that the weak reference returned `None` after the removed node had no remaining strong references.
-This concerns memory used by the compiler itself, not memory management in compiled programs.
-
-### Known Limitations
-
-A variable that only reads itself, for example `k := k + 1`, may remain because its own assignment counts as a read.
-Two unused functions that call each other may also remain because each function has a call.
-The optimization prefers keeping unnecessary code rather than removing code that might affect observable program behavior.
-
-### Additional Task — Calls Without Effects
-
-`EffectAnalyzer` checks whether function calls have observable effects.
-
-The analysis considers:
-
-- Functions that use `print()` or `read()`
-- Member functions that modify their objects
-- Functions containing `while` loops
-- Recursive functions
-- Functions that call other functions with effects
-
-The effects are propagated through function calls until no new effects are discovered.
-Calls without effects can be removed when their results are unused.
-The bonus tests cover pure functions, mutating methods, recursion, loops, lambdas, and effects propagated through function calls.
-
-## Running the Compiler
-
-Activate the virtual environment:
+Commands:
 
 ```bash
-source .venv/bin/activate
+python3 compiler.py tests/io/points.txt points.ll
+llc-18 -filetype=obj -relocation-model=pic points.ll -o points.o
+clang -fPIE points.o -o points
+./points < tests/io/points.sheet.in
 ```
 
-Compile a program normally:
+The program can also be started manually:
 
 ```bash
-python3 compiler.py input.txt output.ll
+./points
 ```
 
-Compile with optimization:
+### Input and Output Tests
+
+I added three test sessions in `tests/io`:
+
+- `points.sheet` checks two matching points.
+- `points.none` checks a case without matching points.
+- `points.all` checks three matching points with negative coordinates.
+
+Each session has an `.in` file with input values and an `.expected` file with the expected output.
+
+### Additional Task — Calling C Functions
+
+I implemented support for external C functions using `extern fn`.
+
+The compiler can now call functions such as `abs` from the C standard library and `isqrt` from `tests/ffi/geometry.c`.
+
+The implementation includes:
+
+- Parsing external function declarations
+- Checking parameter and return types
+- Supporting `i32` and `i64` in external function signatures
+- Generating LLVM function declarations using their original C names
+- Linking the generated object file with C code
+- Checking invalid external function declarations
+- Supporting external functions with `--remove-unused`
+
+The bonus program is located in `tests/ffi/geometry.txt`.
+
+Commands:
 
 ```bash
-python3 compiler.py --remove-unused input.txt output.ll
+python3 compiler.py tests/ffi/geometry.txt geometry.ll
+llc-18 -filetype=obj -relocation-model=pic geometry.ll -o geometry.o
+clang -fPIE geometry.o tests/ffi/geometry.c -o geometry
+./geometry < tests/ffi/geometry.sheet.in
 ```
 
-Display the optimized checked AST:
+The `tests/err` directory also contains tests for invalid `extern fn` declarations.
+
+### Testing
+
+I added `run_tests_practice10.py` to test the new functionality and check that previous features still work.
+
+The script tests programs with and without the `--remove-unused` optimization.
+
+To run all tests:
 
 ```bash
-python3 compiler.py --remove-unused --ast-checked input.txt
+python3 run_tests_practice10.py --all
 ```
 
-Execute the generated LLVM IR:
+To run only the new tests:
 
 ```bash
-lli-18 output.ll
-```
-
-## Testing
-
-Run all Practice 9 tests and regression checks:
-
-```bash
-python3 run_tests_practice9.py --all
-```
-
-Run the memory experiment:
-
-```bash
-python3 measure_practice9_gc.py
+python3 run_tests_practice10.py --all --new-only
 ```
 
 ### Verified Results
 
-Tests executed on Ubuntu:
+I ran the complete Practice 10 test script in my Ubuntu virtual machine after activating the Python virtual environment.
 
-- Practice 9 and regression checks: **206/206 passed**
-- Practice 8: 29/29 passed
-- Practice 6: 15/15 passed
-- Practice 7 regression runner: 90/90 passed
+**Result: 238/238 tests passed.**
 
-The Practice 9 tests check optimized AST output and verify that program behavior is preserved with and without `--remove-unused`.
-The memory experiment confirmed that the removed AST node was released after its remaining strong references were dropped.
+The tests include previous compiler functionality, optimization tests, input/output sessions, and external C function tests.
 
-## Previous Functionality — Practice 8
+### Documentation
 
-Practice 9 builds on the implementation from Practice 8.
+- `reflection.md` contains my personal course reflection.
+- `ai_usage.txt` describes how AI tools were used during the practice.
 
-### Callable Objects
-
-- Structures with a `call` member function can be called directly using `obj(args)`.
-- Callable fields are supported.
-- Argument types and mutation rules are checked.
-- Invalid calls produce compilation errors.
-
-### Lambdas
-
-- Lambdas use the syntax `fn name := [captures](params) -> type`.
-- Variables can be captured by value.
-- Lambdas can be declared inside functions, loops, and other blocks.
-- Lambdas are transformed into structures with captured fields and a `call` method.
-- Invalid captures and lambda usage produce compilation errors.
-
-### Mutable Captures
-
-- `[mut variable]` creates a mutable copy of a captured variable.
-- Modifications to captured copies do not affect the original variables.
-- Nested mutable lambdas and mutation checks are supported.
-
-## AI Usage
-
-ChatGPT was used to assist with implementation, debugging, writing tests, and documentation for Practice 9.
-The prompts, implementation decisions, modifications, and verification details are documented in `ai_usage.txt`.
+The implementation builds on the previous practices and preserves the existing compiler functionality.
